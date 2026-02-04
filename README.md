@@ -179,9 +179,9 @@ public class GlobalExceptionHandler<TRequest, TResponse> : IRequestExceptionHand
 }
 ```
 
-### Pipeline Context
+### Pipeline Context (Cross-Cutting State)
 
-Share data across the pipeline within a request scope:
+The `IPipelineContext` is a **scoped, thread-safe context** that flows through your entire pipeline - across behaviors, pre/post processors, handlers, and even nested requests within the same DI scope. This is the killer feature for cross-cutting concerns that need to share state.
 
 ```csharp
 services.AddConduit(cfg =>
@@ -189,26 +189,117 @@ services.AddConduit(cfg =>
     cfg.RegisterServicesFromAssemblyContaining<Program>();
     cfg.EnablePipelineContext = true;
 });
+```
 
+#### Primitives
+
+Inject `IPipelineContext` anywhere in your pipeline:
+
+```csharp
 public class MyBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
 {
     private readonly IPipelineContext _context;
 
     public MyBehavior(IPipelineContext context) => _context = context;
 
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken ct)
+    {
+        // Store arbitrary data - accessible from ANY pipeline component
+        _context.Items["UserId"] = GetCurrentUserId();
+        _context.Items["CorrelationId"] = Guid.NewGuid().ToString();
+
+        var response = await next();
+        return response;
+    }
+}
+```
+
+#### Built-in Timers
+
+Measure execution time across pipeline stages:
+
+```csharp
+public class TimingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+{
+    private readonly IPipelineContext _context;
+
     public async Task<TResponse> Handle(...)
     {
-        _context.Set("StartTime", DateTime.UtcNow);
+        using var timer = _context.StartTimer($"Handler:{typeof(TRequest).Name}");
         var response = await next();
-        var elapsed = DateTime.UtcNow - _context.Get<DateTime>("StartTime");
+        // timer automatically records elapsed time on dispose
         return response;
+    }
+}
+
+// Later, in a post-processor or logging middleware:
+var timings = _context.GetTimings();
+foreach (var t in timings)
+{
+    Console.WriteLine($"{t.Name}: {t.Elapsed.TotalMilliseconds}ms");
+}
+```
+
+#### Built-in Metrics
+
+Counters and aggregates that accumulate across the pipeline:
+
+```csharp
+// Increment counters
+_context.Increment("db.queries");
+_context.Increment("cache.hits", 5);
+
+// Record values (tracks count, total, min, max)
+_context.Record("response.size", responseBytes);
+
+// Read metrics
+var metrics = _context.GetMetrics();
+var dbQueries = metrics["db.queries"]; // Count, Total, Min, Max
+```
+
+#### Baggage (Flowing Context)
+
+Key-value pairs that propagate through all requests in the scope:
+
+```csharp
+// Set in an early behavior
+_context.SetBaggage("tenant-id", "acme-corp");
+_context.SetBaggage("feature-flags", "new-ui,beta");
+
+// Read anywhere in the pipeline, including nested Send() calls
+var tenantId = _context.GetBaggage("tenant-id");
+var allBaggage = _context.GetAllBaggage();
+```
+
+#### Cross-Request Visibility
+
+The context is **scoped to the DI scope** (typically an HTTP request), so when a handler dispatches additional requests, they all share the same context:
+
+```csharp
+public class CreateOrderHandler : IRequestHandler<CreateOrder, Order>
+{
+    private readonly IDispatcher _dispatcher;
+    private readonly IPipelineContext _context;
+
+    public async Task<Order> Handle(CreateOrder request, CancellationToken ct)
+    {
+        // This nested request shares the same IPipelineContext
+        var inventory = await _dispatcher.Send(new CheckInventory(request.ProductId), ct);
+
+        // Metrics from CheckInventory's pipeline are already in _context
+        _context.Increment("orders.created");
+
+        return new Order(...);
     }
 }
 ```
 
 ### Causality Tracking
 
-Track request chains with W3C Baggage:
+When enabled, Conduit automatically tracks parent-child relationships between requests, giving you a full call graph:
 
 ```csharp
 services.AddConduit(cfg =>
@@ -217,7 +308,19 @@ services.AddConduit(cfg =>
     cfg.EnablePipelineContext = true;
     cfg.EnableCausalityTracking = true;
 });
+
+// In any pipeline component:
+var currentId = _context.GetCurrentRequestId();
+var parentId = _context.GetParentRequestId();
+var fullChain = _context.GetCausalityChain();
+
+foreach (var entry in fullChain)
+{
+    Console.WriteLine($"{entry.RequestId} <- {entry.ParentId}: {entry.RequestType} @ {entry.Timestamp}");
+}
 ```
+
+This is invaluable for debugging complex flows, distributed tracing integration, and understanding "who called whom" in your request pipeline.
 
 ### Validation at Startup
 
