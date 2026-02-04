@@ -10,16 +10,16 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Conduit</PackageId>
-    <Authors>YOUR_NAME_HERE</Authors>
+    <Authors>thomasbeste</Authors>
     <Description>A lightweight mediator library for .NET. Like MediatR, but without the licensing drama.</Description>
     <PackageTags>mediator;cqrs;pipeline;request;handler;notification</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
 
     <!-- Repository Info (update these) -->
-    <RepositoryUrl>https://github.com/YOUR_USERNAME/Conduit</RepositoryUrl>
+    <RepositoryUrl>https://github.com/thomasbeste/Conduit</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageProjectUrl>https://github.com/YOUR_USERNAME/Conduit</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/thomasbeste/Conduit</PackageProjectUrl>
 
     <!-- SourceLink for debugging -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
