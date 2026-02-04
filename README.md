@@ -1,11 +1,11 @@
-# Conduit
+# Cypher
 
 A lightweight mediator library for .NET 10. Like MediatR, but without the licensing drama.
 
 ## Installation
 
 ```bash
-dotnet add package Conduit
+dotnet add package Cypher
 ```
 
 ## Quick Start
@@ -28,7 +28,7 @@ public class PingHandler : IRequestHandler<Ping, Pong>
 ### Register services
 
 ```csharp
-services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<Program>());
+services.AddCypher(cfg => cfg.RegisterServicesFromAssemblyContaining<Program>());
 ```
 
 ### Send requests
@@ -133,7 +133,7 @@ public class LoggingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, 
 }
 
 // Register
-services.AddConduit(cfg =>
+services.AddCypher(cfg =>
 {
     cfg.RegisterServicesFromAssemblyContaining<Program>();
     cfg.AddBehavior(typeof(LoggingBehavior<,>));
@@ -184,7 +184,7 @@ public class GlobalExceptionHandler<TRequest, TResponse> : IRequestExceptionHand
 The `IPipelineContext` is a **scoped, thread-safe context** that flows through your entire pipeline - across behaviors, pre/post processors, handlers, and even nested requests within the same DI scope. This is the killer feature for cross-cutting concerns that need to share state.
 
 ```csharp
-services.AddConduit(cfg =>
+services.AddCypher(cfg =>
 {
     cfg.RegisterServicesFromAssemblyContaining<Program>();
     cfg.EnablePipelineContext = true;
@@ -299,10 +299,10 @@ public class CreateOrderHandler : IRequestHandler<CreateOrder, Order>
 
 ### Causality Tracking
 
-When enabled, Conduit automatically tracks parent-child relationships between requests, giving you a full call graph:
+When enabled, Cypher automatically tracks parent-child relationships between requests, giving you a full call graph:
 
 ```csharp
-services.AddConduit(cfg =>
+services.AddCypher(cfg =>
 {
     cfg.RegisterServicesFromAssemblyContaining<Program>();
     cfg.EnablePipelineContext = true;
@@ -328,13 +328,13 @@ Catch missing handlers early:
 
 ```csharp
 var app = builder.Build();
-app.Services.ValidateConduitRegistrations(typeof(Program).Assembly);
+app.Services.ValidateCypherRegistrations(typeof(Program).Assembly);
 ```
 
 ## Configuration Options
 
 ```csharp
-services.AddConduit(cfg =>
+services.AddCypher(cfg =>
 {
     // Assembly scanning
     cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
