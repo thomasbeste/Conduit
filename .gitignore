@@ -1,0 +1,36 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+TestResults/
+
+# Coverage
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+
+# OS generated
+.DS_Store
+Thumbs.db
