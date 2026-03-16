@@ -316,6 +316,27 @@ public class CreateOrderHandler : IRequestHandler<CreateOrder, Order>
 }
 ```
 
+### Ambient Context (`PipelineContext.Current`)
+
+`PipelineContext` has an `AsyncLocal` static accessor, so you can access it anywhere in the async flow — not just where DI is available:
+
+```csharp
+// Set ambient context (returns IDisposable that restores previous)
+using var scope = PipelineContext.SetCurrent(myContext);
+
+// Access anywhere
+var ctx = PipelineContext.Current; // null if not set
+ctx?.SetBaggage("tenant-id", tenantId);
+var tenant = ctx?.GetBaggage("tenant-id");
+```
+
+This is especially useful for:
+- **Background services** where DI scopes don't exist
+- **Static helpers** that need context without constructor injection
+- **Cross-process consumers** where context is hydrated from message headers
+
+The ambient context nests correctly — `SetCurrent` returns an `IDisposable` that restores the previous context on dispose, making it safe for concurrent async flows.
+
 ### Causality Tracking
 
 When enabled, Conduit automatically tracks parent-child relationships between requests, giving you a full call graph:
@@ -426,7 +447,8 @@ public class OrderPlacedConsumer : IMessageConsumer<OrderPlaced>
 services.AddConduitMessaging(cfg =>
 {
     cfg.ServiceName = "service-orders";
-    cfg.UseRabbitMq(settings);          // or cfg.UseInMemory() for tests
+    cfg.UseRabbitMq(settings);              // or cfg.UseInMemory() for tests
+    cfg.PropagateContextHeaders = true;     // auto-propagate PipelineContext baggage
     cfg.AddConsumer<OrderPlacedConsumer>();
     cfg.AddConsumersFromAssembly(typeof(Program).Assembly);
 });
@@ -567,7 +589,27 @@ The `MessageBusHostedService` is registered by the core and will call `StartAsyn
 
 When `IPipelineContext` is enabled in the mediator, the bridge propagates context (baggage, causality chain, correlation ID) across process boundaries via message headers.
 
-### Publishing side — extract context into headers
+### Automatic Context Propagation
+
+Enable `PropagateContextHeaders` to automatically extract `PipelineContext.Current` baggage into message headers on every publish/send — no manual header extraction needed:
+
+```csharp
+services.AddConduitMessaging(cfg =>
+{
+    cfg.ServiceName = "my-service";
+    cfg.UseRabbitMq(settings);
+    cfg.PropagateContextHeaders = true; // auto-propagate context
+});
+
+// Now every publish automatically includes baggage, causality, correlation headers
+await publisher.PublishAsync(new OrderPlaced { ... }, ct);
+```
+
+This wraps `IMessagePublisher` with a `ContextPropagatingPublisher` decorator that reads from `PipelineContext.Current` and merges headers via `PipelineContextBridge.ExtractHeaders`. The decorator uses lazy publisher resolution, so it works even when resolved before the bus hosted service has started.
+
+### Manual Context Propagation
+
+If you prefer explicit control, extract headers manually:
 
 ```csharp
 var headers = PipelineContextBridge.ExtractHeaders(pipelineContext);
