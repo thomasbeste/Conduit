@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
 using System.Security.Authentication;
-using Conduit.Messaging.Serialization;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 
@@ -11,14 +9,14 @@ namespace Conduit.Messaging.RabbitMq;
 /// RabbitMQ implementation of IMessageBus.
 /// Manages connection, publisher, and consumer channels.
 /// </summary>
-public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
+public sealed class RabbitMqMessageBus(
+    RabbitMqSettings settings,
+    string serviceName,
+    List<ConsumerRegistration> consumerRegistrations,
+    IServiceProvider serviceProvider,
+    ILogger<RabbitMqMessageBus> logger)
+    : IMessageBus, IAsyncDisposable
 {
-    private readonly RabbitMqSettings _settings;
-    private readonly string _serviceName;
-    private readonly List<ConsumerRegistration> _consumerRegistrations;
-    private readonly IServiceProvider _serviceProvider;
-    private readonly ILogger<RabbitMqMessageBus> _logger;
-
     private IConnection? _connection;
     private RabbitMqPublisher? _publisher;
     private readonly ConcurrentBag<RabbitMqConsumerHost> _consumerHosts = [];
@@ -30,73 +28,59 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
     /// </summary>
     public Action<object, Type>? OnMessageConsumed { get; set; }
 
-    public RabbitMqMessageBus(
-        RabbitMqSettings settings,
-        string serviceName,
-        List<ConsumerRegistration> consumerRegistrations,
-        IServiceProvider serviceProvider,
-        ILogger<RabbitMqMessageBus> logger)
-    {
-        _settings = settings;
-        _serviceName = serviceName;
-        _consumerRegistrations = consumerRegistrations;
-        _serviceProvider = serviceProvider;
-        _logger = logger;
-    }
-
     public IMessagePublisher Publisher => _publisher
-        ?? throw new InvalidOperationException("Message bus has not been started. Call StartAsync first.");
+                                          ?? throw new InvalidOperationException("Message bus has not been started. Call StartAsync first.");
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         if (_started) return;
 
-        _logger.LogInformation(
+        logger.LogInformation(
             "Starting RabbitMQ message bus for {ServiceName} on {Host}:{Port}/{VHost}",
-            _serviceName, _settings.Host, _settings.Port, _settings.VirtualHost);
+            serviceName, settings.Host, settings.Port, settings.VirtualHost);
 
         var factory = new ConnectionFactory
         {
-            HostName = _settings.Host,
-            Port = _settings.Port,
-            VirtualHost = _settings.VirtualHost,
-            UserName = _settings.Username,
-            Password = _settings.Password,
+            HostName = settings.Host,
+            Port = settings.Port,
+            VirtualHost = settings.VirtualHost,
+            UserName = settings.Username,
+            Password = settings.Password,
             AutomaticRecoveryEnabled = true,
             NetworkRecoveryInterval = TimeSpan.FromSeconds(10),
-            ClientProvidedName = _serviceName
+            ClientProvidedName = serviceName
         };
 
-        if (_settings.UseSsl)
+        if (settings.UseSsl)
         {
             factory.Ssl = new SslOption
             {
                 Enabled = true,
-                ServerName = _settings.Host,
+                ServerName = settings.Host,
                 Version = SslProtocols.Tls12 | SslProtocols.Tls13
             };
         }
 
         _connection = await factory.CreateConnectionAsync(cancellationToken);
-        _logger.LogInformation("RabbitMQ connection established for {ServiceName}", _serviceName);
+        logger.LogInformation("RabbitMQ connection established for {ServiceName}", serviceName);
 
         // Create publisher channel
         var publishChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
-        _publisher = new RabbitMqPublisher(publishChannel, _logger);
+        _publisher = new RabbitMqPublisher(publishChannel, logger);
 
         // Create consumer hosts
-        foreach (var reg in _consumerRegistrations)
+        foreach (var reg in consumerRegistrations)
         {
             var consumerChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
-            await consumerChannel.BasicQosAsync(0, _settings.PrefetchCount, false, cancellationToken);
+            await consumerChannel.BasicQosAsync(0, settings.PrefetchCount, false, cancellationToken);
 
             var host = new RabbitMqConsumerHost(
                 consumerChannel,
                 reg,
-                _serviceName,
-                _settings,
-                _serviceProvider,
-                _logger,
+                serviceName,
+                settings,
+                serviceProvider,
+                logger,
                 () => OnMessageConsumed);
 
             await host.StartAsync(cancellationToken);
@@ -105,16 +89,16 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
 
         _started = true;
 
-        _logger.LogInformation(
+        logger.LogInformation(
             "RabbitMQ message bus started for {ServiceName}: {ConsumerCount} consumers registered",
-            _serviceName, _consumerRegistrations.Count);
+            serviceName, consumerRegistrations.Count);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         if (!_started) return;
 
-        _logger.LogInformation("Stopping RabbitMQ message bus for {ServiceName}", _serviceName);
+        logger.LogInformation("Stopping RabbitMQ message bus for {ServiceName}", serviceName);
 
         foreach (var host in _consumerHosts)
         {
@@ -133,7 +117,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
         }
 
         _started = false;
-        _logger.LogInformation("RabbitMQ message bus stopped for {ServiceName}", _serviceName);
+        logger.LogInformation("RabbitMQ message bus stopped for {ServiceName}", serviceName);
     }
 
     public MessageBusHealth GetHealth()
@@ -145,11 +129,11 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
             Status = isHealthy ? "Connected" : "Disconnected",
             Details = new MessageBusHealthDetails
             {
-                Service = _serviceName,
-                Host = _settings.Host,
-                Port = _settings.Port,
-                VirtualHost = _settings.VirtualHost,
-                ConsumerCount = _consumerRegistrations.Count,
+                Service = serviceName,
+                Host = settings.Host,
+                Port = settings.Port,
+                VirtualHost = settings.VirtualHost,
+                ConsumerCount = consumerRegistrations.Count,
                 Started = _started
             }
         };

@@ -12,49 +12,32 @@ namespace Conduit.Messaging.RabbitMq;
 /// <summary>
 /// Hosts a single consumer channel, declares queue/exchange/binding, and dispatches messages.
 /// </summary>
-public sealed class RabbitMqConsumerHost
+public sealed class RabbitMqConsumerHost(
+    IChannel channel,
+    ConsumerRegistration registration,
+    string serviceName,
+    RabbitMqSettings settings,
+    IServiceProvider serviceProvider,
+    ILogger logger,
+    Func<Action<object, Type>?>? getOnMessageConsumed = null)
 {
-    private readonly IChannel _channel;
-    private readonly ConsumerRegistration _registration;
-    private readonly string _serviceName;
-    private readonly RabbitMqSettings _settings;
-    private readonly IServiceProvider _serviceProvider;
-    private readonly ILogger _logger;
-    private readonly Func<Action<object, Type>?> _getOnMessageConsumed;
+    private readonly Func<Action<object, Type>?> _getOnMessageConsumed = getOnMessageConsumed ?? (() => null);
     private string? _consumerTag;
-
-    public RabbitMqConsumerHost(
-        IChannel channel,
-        ConsumerRegistration registration,
-        string serviceName,
-        RabbitMqSettings settings,
-        IServiceProvider serviceProvider,
-        ILogger logger,
-        Func<Action<object, Type>?>? getOnMessageConsumed = null)
-    {
-        _channel = channel;
-        _registration = registration;
-        _serviceName = serviceName;
-        _settings = settings;
-        _serviceProvider = serviceProvider;
-        _logger = logger;
-        _getOnMessageConsumed = getOnMessageConsumed ?? (() => null);
-    }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        var exchangeName = MessageSerializer.GetExchangeName(_registration.MessageType);
-        var queueName = MessageSerializer.GetQueueName(_serviceName, _registration.ConsumerType);
+        var exchangeName = MessageSerializer.GetExchangeName(registration.MessageType);
+        var queueName = MessageSerializer.GetQueueName(serviceName, registration.ConsumerType);
         var dlxExchange = $"{exchangeName}.dlx";
         var dlqQueue = $"{queueName}.dlq";
 
         // Declare dead-letter exchange and queue
-        await _channel.ExchangeDeclareAsync(dlxExchange, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
-        await _channel.QueueDeclareAsync(dlqQueue, durable: true, exclusive: false, autoDelete: false, cancellationToken: cancellationToken);
-        await _channel.QueueBindAsync(dlqQueue, dlxExchange, "", cancellationToken: cancellationToken);
+        await channel.ExchangeDeclareAsync(dlxExchange, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
+        await channel.QueueDeclareAsync(dlqQueue, durable: true, exclusive: false, autoDelete: false, cancellationToken: cancellationToken);
+        await channel.QueueBindAsync(dlqQueue, dlxExchange, "", cancellationToken: cancellationToken);
 
         // Declare message type exchange
-        await _channel.ExchangeDeclareAsync(exchangeName, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
+        await channel.ExchangeDeclareAsync(exchangeName, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
 
         // Declare consumer queue with dead-letter configuration
         var queueArgs = new Dictionary<string, object?>
@@ -63,19 +46,19 @@ public sealed class RabbitMqConsumerHost
             ["x-dead-letter-routing-key"] = dlqQueue
         };
 
-        await _channel.QueueDeclareAsync(queueName, durable: true, exclusive: false, autoDelete: false,
+        await channel.QueueDeclareAsync(queueName, durable: true, exclusive: false, autoDelete: false,
             arguments: queueArgs, cancellationToken: cancellationToken);
-        await _channel.QueueBindAsync(queueName, exchangeName, "", cancellationToken: cancellationToken);
+        await channel.QueueBindAsync(queueName, exchangeName, "", cancellationToken: cancellationToken);
 
         // Start consuming
-        var consumer = new AsyncEventingBasicConsumer(_channel);
+        var consumer = new AsyncEventingBasicConsumer(channel);
         consumer.ReceivedAsync += OnMessageReceivedAsync;
 
-        _consumerTag = await _channel.BasicConsumeAsync(queueName, autoAck: false, consumer: consumer, cancellationToken: cancellationToken);
+        _consumerTag = await channel.BasicConsumeAsync(queueName, autoAck: false, consumer: consumer, cancellationToken: cancellationToken);
 
-        _logger.LogInformation(
+        logger.LogInformation(
             "Consumer {ConsumerType} started on queue {Queue} bound to {Exchange}",
-            _registration.ConsumerType.Name, queueName, exchangeName);
+            registration.ConsumerType.Name, queueName, exchangeName);
     }
 
     private async Task OnMessageReceivedAsync(object sender, BasicDeliverEventArgs ea)
@@ -84,13 +67,13 @@ public sealed class RabbitMqConsumerHost
 
         try
         {
-            var (message, envelope) = MessageSerializer.Deserialize(ea.Body, _registration.MessageType);
+            var (message, envelope) = MessageSerializer.Deserialize(ea.Body, registration.MessageType);
 
             if (message == null)
             {
-                _logger.LogWarning("Deserialized null message from {Exchange}, nacking without requeue",
+                logger.LogWarning("Deserialized null message from {Exchange}, nacking without requeue",
                     ea.Exchange);
-                await _channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
+                await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
                 return;
             }
 
@@ -106,7 +89,7 @@ public sealed class RabbitMqConsumerHost
             };
 
             // Resolve consumer from DI and dispatch
-            await using var scope = _serviceProvider.CreateAsyncScope();
+            await using var scope = serviceProvider.CreateAsyncScope();
 
             // Hydrate pipeline context with cross-process state (baggage, causality) if available
             var pipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
@@ -119,26 +102,26 @@ public sealed class RabbitMqConsumerHost
                     PipelineContext.SetCurrent(concrete);
             }
 
-            var consumerInstance = scope.ServiceProvider.GetRequiredService(_registration.ConsumerType);
-            await _registration.GetDispatcher().DispatchAsync(consumerInstance, message, context, CancellationToken.None);
+            var consumerInstance = scope.ServiceProvider.GetRequiredService(registration.ConsumerType);
+            await registration.GetDispatcher().DispatchAsync(consumerInstance, message, context, CancellationToken.None);
 
-            await _channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
-            _getOnMessageConsumed()?.Invoke(message, _registration.MessageType);
+            await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
+            _getOnMessageConsumed()?.Invoke(message, registration.MessageType);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error consuming message from {Exchange} (delivery #{Count})",
+            logger.LogError(ex, "Error consuming message from {Exchange} (delivery #{Count})",
                 ea.Exchange, deliveryCount);
 
             // Requeue if under retry limit, otherwise dead-letter
-            var shouldRequeue = deliveryCount < _settings.RetryCount;
-            await _channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: shouldRequeue);
+            var shouldRequeue = deliveryCount < settings.RetryCount;
+            await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: shouldRequeue);
 
             if (!shouldRequeue)
             {
-                _logger.LogWarning(
+                logger.LogWarning(
                     "Message from {Exchange} exceeded retry limit ({RetryCount}), sent to DLQ",
-                    ea.Exchange, _settings.RetryCount);
+                    ea.Exchange, settings.RetryCount);
             }
         }
     }
@@ -171,9 +154,9 @@ public sealed class RabbitMqConsumerHost
     {
         if (_consumerTag != null)
         {
-            await _channel.BasicCancelAsync(_consumerTag, cancellationToken: cancellationToken);
+            await channel.BasicCancelAsync(_consumerTag, cancellationToken: cancellationToken);
         }
-        await _channel.CloseAsync(cancellationToken);
-        _channel.Dispose();
+        await channel.CloseAsync(cancellationToken);
+        channel.Dispose();
     }
 }

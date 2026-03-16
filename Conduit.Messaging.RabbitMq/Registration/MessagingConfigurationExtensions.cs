@@ -9,22 +9,25 @@ namespace Conduit.Messaging.RabbitMq.Registration;
 /// </summary>
 public static class MessagingConfigurationExtensions
 {
-    /// <summary>
-    /// Configures RabbitMQ as the transport with pre-built settings.
-    /// </summary>
-    public static void UseRabbitMq(this MessagingConfiguration config, RabbitMqSettings settings)
+    extension(MessagingConfiguration config)
     {
-        config.TransportRegistrar = (services, cfg) => RegisterRabbitMq(services, cfg, settings);
-    }
+        /// <summary>
+        /// Configures RabbitMQ as the transport with pre-built settings.
+        /// </summary>
+        public void UseRabbitMq(RabbitMqSettings settings)
+        {
+            config.TransportRegistrar = (services, cfg) => RegisterRabbitMq(services, cfg, settings);
+        }
 
-    /// <summary>
-    /// Configures RabbitMQ as the transport with a settings builder.
-    /// </summary>
-    public static void UseRabbitMq(this MessagingConfiguration config, Action<RabbitMqSettings> configure)
-    {
-        var settings = new RabbitMqSettings();
-        configure(settings);
-        config.UseRabbitMq(settings);
+        /// <summary>
+        /// Configures RabbitMQ as the transport with a settings builder.
+        /// </summary>
+        public void UseRabbitMq(Action<RabbitMqSettings> configure)
+        {
+            var settings = new RabbitMqSettings();
+            configure(settings);
+            config.UseRabbitMq(settings);
+        }
     }
 
     private static void RegisterRabbitMq(IServiceCollection services, MessagingConfiguration config, RabbitMqSettings settings)

@@ -20,83 +20,89 @@ public static class PipelineContextExtensions
 
     #region Baggage
 
-    /// <summary>
-    /// Sets a baggage value that flows through all requests in the current scope.
-    /// </summary>
-    public static void SetBaggage(this IPipelineContext ctx, string key, string value)
+    extension(IPipelineContext ctx)
     {
-        var baggage = ctx.Items.GetOrAdd(ContextKeys.Baggage, () => new Dictionary<string, string>());
-        baggage[key] = value;
-    }
+        /// <summary>
+        /// Sets a baggage value that flows through all requests in the current scope.
+        /// </summary>
+        public void SetBaggage(string key, string value)
+        {
+            var baggage = ctx.Items.GetOrAdd(ContextKeys.Baggage, () => new Dictionary<string, string>());
+            baggage[key] = value;
+        }
 
-    /// <summary>
-    /// Gets a baggage value from the current scope.
-    /// </summary>
-    public static string? GetBaggage(this IPipelineContext ctx, string key)
-    {
-        if (!ctx.Items.TryGetValue(ContextKeys.Baggage, out var b) || b is not Dictionary<string, string> baggage)
-            return null;
+        /// <summary>
+        /// Gets a baggage value from the current scope.
+        /// </summary>
+        public string? GetBaggage(string key)
+        {
+            if (!ctx.Items.TryGetValue(ContextKeys.Baggage, out var b) || b is not Dictionary<string, string> baggage)
+                return null;
 
-        return baggage.GetValueOrDefault(key);
-    }
+            return baggage.GetValueOrDefault(key);
+        }
 
-    /// <summary>
-    /// Gets all baggage values from the current scope.
-    /// </summary>
-    public static IReadOnlyDictionary<string, string> GetAllBaggage(this IPipelineContext ctx)
-    {
-        if (!ctx.Items.TryGetValue(ContextKeys.Baggage, out var b) || b is not Dictionary<string, string> baggage)
-            return new Dictionary<string, string>();
+        /// <summary>
+        /// Gets all baggage values from the current scope.
+        /// </summary>
+        public IReadOnlyDictionary<string, string> GetAllBaggage()
+        {
+            if (!ctx.Items.TryGetValue(ContextKeys.Baggage, out var b) || b is not Dictionary<string, string> baggage)
+                return new Dictionary<string, string>();
 
-        return baggage;
+            return baggage;
+        }
     }
 
     #endregion
 
     #region Causality
 
-    /// <summary>
-    /// Gets the current request ID within the causality chain.
-    /// </summary>
-    public static string? GetCurrentRequestId(this IPipelineContext ctx)
+    extension(IPipelineContext ctx)
     {
-        return ctx.Items.TryGetValue(ContextKeys.CurrentRequestId, out var id) ? (string?)id : null;
-    }
+        /// <summary>
+        /// Gets the current request ID within the causality chain.
+        /// </summary>
+        public string? GetCurrentRequestId()
+        {
+            return ctx.Items.TryGetValue(ContextKeys.CurrentRequestId, out var id) ? (string?)id : null;
+        }
 
-    /// <summary>
-    /// Gets the parent request ID (the request that spawned the current one).
-    /// Returns null if this is a root request.
-    /// </summary>
-    public static string? GetParentRequestId(this IPipelineContext ctx)
-    {
-        var chain = ctx.GetCausalityChain();
-        var currentId = ctx.GetCurrentRequestId();
+        /// <summary>
+        /// Gets the parent request ID (the request that spawned the current one).
+        /// Returns null if this is a root request.
+        /// </summary>
+        public string? GetParentRequestId()
+        {
+            var chain = ctx.GetCausalityChain();
+            var currentId = ctx.GetCurrentRequestId();
 
-        if (currentId is null || chain.Count == 0)
-            return null;
+            if (currentId is null || chain.Count == 0)
+                return null;
 
-        var current = chain.FirstOrDefault(e => e.RequestId == currentId);
-        return current?.ParentId;
-    }
+            var current = chain.FirstOrDefault(e => e.RequestId == currentId);
+            return current?.ParentId;
+        }
 
-    /// <summary>
-    /// Gets the full causality chain of all requests in this scope.
-    /// </summary>
-    public static IReadOnlyList<CausalityEntry> GetCausalityChain(this IPipelineContext ctx)
-    {
-        if (!ctx.Items.TryGetValue(ContextKeys.CausalityChain, out var c) || c is not List<CausalityEntry> chain)
-            return [];
+        /// <summary>
+        /// Gets the full causality chain of all requests in this scope.
+        /// </summary>
+        public IReadOnlyList<CausalityEntry> GetCausalityChain()
+        {
+            if (!ctx.Items.TryGetValue(ContextKeys.CausalityChain, out var c) || c is not List<CausalityEntry> chain)
+                return [];
 
-        return chain;
-    }
+            return chain;
+        }
 
-    /// <summary>
-    /// Records a causality entry. Used by CausalityBehavior and cross-process bridge.
-    /// </summary>
-    public static void RecordCausality(this IPipelineContext ctx, string requestId, string? parentId, string requestType)
-    {
-        var chain = ctx.Items.GetOrAdd(ContextKeys.CausalityChain, () => new List<CausalityEntry>());
-        chain.Add(new CausalityEntry(requestId, parentId, requestType, DateTimeOffset.UtcNow));
+        /// <summary>
+        /// Records a causality entry. Used by CausalityBehavior and cross-process bridge.
+        /// </summary>
+        public void RecordCausality(string requestId, string? parentId, string requestType)
+        {
+            var chain = ctx.Items.GetOrAdd(ContextKeys.CausalityChain, () => new List<CausalityEntry>());
+            chain.Add(new CausalityEntry(requestId, parentId, requestType, DateTimeOffset.UtcNow));
+        }
     }
 
     #endregion
