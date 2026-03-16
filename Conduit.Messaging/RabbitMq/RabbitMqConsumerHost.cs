@@ -1,4 +1,6 @@
 using System.Text;
+using Conduit.Mediator;
+using Conduit.Messaging.Bridge;
 using Conduit.Messaging.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -102,6 +104,14 @@ public sealed class RabbitMqConsumerHost
 
             // Resolve consumer from DI and dispatch
             await using var scope = _serviceProvider.CreateAsyncScope();
+
+            // Hydrate pipeline context with cross-process state (baggage, causality) if available
+            var pipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
+            if (pipelineContext is not null)
+            {
+                PipelineContextBridge.HydrateContext(pipelineContext, context);
+            }
+
             var consumerInstance = scope.ServiceProvider.GetRequiredService(_registration.ConsumerType);
 
             // Call ConsumeAsync via the IMessageConsumer<T> interface

@@ -91,9 +91,9 @@ public static class PipelineContextExtensions
     }
 
     /// <summary>
-    /// Records a causality entry. Used internally by CausalityBehavior.
+    /// Records a causality entry. Used by CausalityBehavior and cross-process bridge.
     /// </summary>
-    internal static void RecordCausality(this IPipelineContext ctx, string requestId, string? parentId, string requestType)
+    public static void RecordCausality(this IPipelineContext ctx, string requestId, string? parentId, string requestType)
     {
         var chain = ctx.Items.GetOrAdd(ContextKeys.CausalityChain, () => new List<CausalityEntry>());
         chain.Add(new CausalityEntry(requestId, parentId, requestType, DateTimeOffset.UtcNow));

@@ -76,7 +76,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
 
         // Create publisher channel
         var publishChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
-        _publisher = new RabbitMqPublisher(publishChannel, _logger);
+        _publisher = new RabbitMqPublisher(publishChannel, _serviceProvider, _logger);
 
         // Create consumer hosts
         foreach (var reg in _consumerRegistrations)

@@ -1,4 +1,7 @@
+using Conduit.Mediator;
+using Conduit.Messaging.Bridge;
 using Conduit.Messaging.Serialization;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 
@@ -6,10 +9,12 @@ namespace Conduit.Messaging.RabbitMq;
 
 /// <summary>
 /// RabbitMQ implementation of IMessagePublisher.
-/// Publishes to type-based fanout exchanges.
+/// Publishes to type-based fanout exchanges. When an <see cref="IPipelineContext"/> is available
+/// in the current DI scope, automatically propagates baggage and causality chain to message headers.
 /// </summary>
 public sealed class RabbitMqPublisher(
     IChannel channel,
+    IServiceProvider serviceProvider,
     ILogger logger) : IMessagePublisher, IAsyncDisposable
 {
     /// <summary>
@@ -23,12 +28,14 @@ public sealed class RabbitMqPublisher(
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
         await EnsureExchangeDeclaredAsync(exchangeName, cancellationToken);
 
-        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name);
+        var contextHeaders = ExtractContextHeaders();
+        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, contextHeaders);
         var properties = new BasicProperties
         {
             ContentType = "application/json",
             DeliveryMode = DeliveryModes.Persistent,
             MessageId = Guid.NewGuid().ToString(),
+            CorrelationId = contextHeaders?.GetValueOrDefault("conduit.correlation-id"),
             Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
         };
 
@@ -43,12 +50,14 @@ public sealed class RabbitMqPublisher(
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
         await EnsureExchangeDeclaredAsync(exchangeName, "topic", cancellationToken);
 
-        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name);
+        var contextHeaders = ExtractContextHeaders();
+        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, contextHeaders);
         var properties = new BasicProperties
         {
             ContentType = "application/json",
             DeliveryMode = DeliveryModes.Persistent,
             MessageId = Guid.NewGuid().ToString(),
+            CorrelationId = contextHeaders?.GetValueOrDefault("conduit.correlation-id"),
             Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
         };
 
@@ -61,12 +70,14 @@ public sealed class RabbitMqPublisher(
     public async Task SendAsync<TMessage>(TMessage message, string queueName, CancellationToken cancellationToken = default)
         where TMessage : class
     {
-        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name);
+        var contextHeaders = ExtractContextHeaders();
+        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, contextHeaders);
         var properties = new BasicProperties
         {
             ContentType = "application/json",
             DeliveryMode = DeliveryModes.Persistent,
             MessageId = Guid.NewGuid().ToString(),
+            CorrelationId = contextHeaders?.GetValueOrDefault("conduit.correlation-id"),
             Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
         };
 
@@ -74,6 +85,24 @@ public sealed class RabbitMqPublisher(
         await channel.BasicPublishAsync("", routingKey: queueName, mandatory: false, properties, body, cancellationToken);
 
         logger.LogDebug("Sent {MessageType} to queue {Queue}", typeof(TMessage).Name, queueName);
+    }
+
+    /// <summary>
+    /// Attempts to resolve IPipelineContext from the current DI scope and extract headers.
+    /// Returns null if no pipeline context is available (graceful degradation).
+    /// </summary>
+    private Dictionary<string, string>? ExtractContextHeaders()
+    {
+        try
+        {
+            var pipelineContext = serviceProvider.GetService<IPipelineContext>();
+            return pipelineContext is not null ? PipelineContextBridge.ExtractHeaders(pipelineContext) : null;
+        }
+        catch
+        {
+            // Gracefully handle cases where we're outside a DI scope
+            return null;
+        }
     }
 
     private async Task EnsureExchangeDeclaredAsync(string exchangeName, CancellationToken cancellationToken)

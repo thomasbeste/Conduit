@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Conduit.Mediator;
+using Conduit.Messaging.Bridge;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Conduit.Messaging.InMemory;
@@ -56,15 +58,32 @@ public sealed class InMemoryMessageBus : IMessageBus
         var messageType = message.GetType();
         _published.Add(new PublishedMessageRecord(message, messageType, DateTime.UtcNow));
 
+        // Extract context headers from the publishing scope's pipeline context
+        Dictionary<string, string>? contextHeaders = null;
+        var publisherContext = _serviceProvider.GetService<IPipelineContext>();
+        if (publisherContext is not null)
+        {
+            contextHeaders = PipelineContextBridge.ExtractHeaders(publisherContext);
+        }
+
         var context = new MessageContext
         {
             MessageId = Guid.NewGuid(),
-            SentTime = DateTime.UtcNow
+            SentTime = DateTime.UtcNow,
+            Headers = contextHeaders?.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
         };
 
         foreach (var binding in _bindings.Where(b => b.MessageType.IsAssignableFrom(messageType)))
         {
             await using var scope = _serviceProvider.CreateAsyncScope();
+
+            // Hydrate the consumer scope's pipeline context with cross-process state
+            var consumerPipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
+            if (consumerPipelineContext is not null)
+            {
+                PipelineContextBridge.HydrateContext(consumerPipelineContext, context);
+            }
+
             var consumer = scope.ServiceProvider.GetRequiredService(binding.ConsumerType);
 
             var consumerInterface = typeof(IMessageConsumer<>).MakeGenericType(binding.MessageType);
