@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Extension methods for ergonomic access to cross-request context patterns.

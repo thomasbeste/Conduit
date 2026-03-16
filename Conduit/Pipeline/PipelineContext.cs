@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Thread-safe implementation of <see cref="IPipelineContext"/> that accumulates data across pipeline executions.

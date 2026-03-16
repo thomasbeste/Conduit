@@ -51,7 +51,7 @@ public class PrePostProcessorTests
         ExecutionLog.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PrePostProcessorTests>();
             cfg.AddPreProcessor<PreProcessor>();
@@ -73,7 +73,7 @@ public class PrePostProcessorTests
         ExecutionLog.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PrePostProcessorTests>();
             cfg.AddPostProcessor<PostProcessor>();
@@ -95,7 +95,7 @@ public class PrePostProcessorTests
         ExecutionLog.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PrePostProcessorTests>();
             cfg.AddPreProcessor<PreProcessor>();
@@ -119,7 +119,7 @@ public class PrePostProcessorTests
         ExecutionLog.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PrePostProcessorTests>();
             cfg.AddOpenPreProcessor(typeof(GenericPreProcessor<>));

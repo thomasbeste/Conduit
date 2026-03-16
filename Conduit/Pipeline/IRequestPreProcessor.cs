@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Pre-processor that runs before the request handler.

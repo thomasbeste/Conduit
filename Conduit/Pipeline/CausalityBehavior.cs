@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Pipeline behavior that automatically tracks request causality chains.

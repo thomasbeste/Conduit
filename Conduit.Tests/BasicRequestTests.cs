@@ -32,7 +32,7 @@ public class BasicRequestTests
     public async Task Send_WithResponse_ReturnsExpectedResult()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<BasicRequestTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<BasicRequestTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -46,7 +46,7 @@ public class BasicRequestTests
     public async Task Send_VoidRequest_ReturnsUnit()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<BasicRequestTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<BasicRequestTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -61,7 +61,7 @@ public class BasicRequestTests
     public async Task Send_Untyped_ReturnsResponse()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<BasicRequestTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<BasicRequestTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -77,7 +77,7 @@ public class BasicRequestTests
     public async Task Send_NoHandler_ThrowsInvalidOperationException()
     {
         var services = new ServiceCollection();
-        services.AddConduit(_ => { }); // No handlers registered
+        services.AddMediator(_ => { }); // No handlers registered
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();

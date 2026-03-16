@@ -66,7 +66,7 @@ public class PipelineContextTests
     public async Task SingleRequest_RecordsTiming()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineContextTests>();
             cfg.AddOpenBehavior(typeof(TimingBehavior<,>));
@@ -90,7 +90,7 @@ public class PipelineContextTests
     public async Task MultipleRequests_AccumulateTimings()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineContextTests>();
             cfg.AddOpenBehavior(typeof(TimingBehavior<,>));
@@ -116,7 +116,7 @@ public class PipelineContextTests
     public async Task Increment_AccumulatesCounter()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineContextTests>();
             cfg.AddOpenBehavior(typeof(CountingBehavior<,>));
@@ -174,7 +174,7 @@ public class PipelineContextTests
     public async Task DifferentScopes_HaveSeparateContexts()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineContextTests>();
             cfg.AddOpenBehavior(typeof(TimingBehavior<,>));
@@ -210,7 +210,7 @@ public class PipelineContextTests
     public async Task DisabledPipelineContext_BehaviorHandlesNullGracefully()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineContextTests>();
             cfg.EnablePipelineContext = false;
@@ -230,7 +230,7 @@ public class PipelineContextTests
     public async Task ThreadSafety_ParallelSendCalls_DoNotCorruptState()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineContextTests>();
             cfg.AddOpenBehavior(typeof(TimingBehavior<,>));

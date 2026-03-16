@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 public class RequestExceptionHandlerState<TResponse>
 {

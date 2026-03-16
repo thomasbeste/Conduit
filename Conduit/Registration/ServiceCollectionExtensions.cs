@@ -2,7 +2,7 @@ using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Extension methods for registering Conduit services with the DI container.
@@ -11,15 +11,15 @@ public static class ServiceCollectionExtensions
 {
     extension(IServiceCollection services)
     {
-        public IServiceCollection AddConduit(Action<ConduitConfiguration> configure)
+        public IServiceCollection AddMediator(Action<MediatorConfiguration> configure)
         {
-            var config = new ConduitConfiguration();
+            var config = new MediatorConfiguration();
             configure(config);
 
-            return services.AddConduit(config);
+            return services.AddMediator(config);
         }
 
-        public IServiceCollection AddConduit(ConduitConfiguration config)
+        public IServiceCollection AddMediator(MediatorConfiguration config)
         {
             var lifetime = config.Lifetime;
 
@@ -143,7 +143,7 @@ public static class ServiceCollectionExtensions
     /// Call this at startup to catch misconfiguration early instead of at first dispatch.
     /// </summary>
     /// <param name="serviceProvider">The built service provider.</param>
-    /// <param name="assemblies">Assemblies to scan for request types. Should match assemblies passed to <see cref="ConduitConfiguration.RegisterServicesFromAssembly"/>.</param>
+    /// <param name="assemblies">Assemblies to scan for request types. Should match assemblies passed to <see cref="MediatorConfiguration.RegisterServicesFromAssembly"/>.</param>
     /// <exception cref="InvalidOperationException">Thrown when one or more request types are missing handlers.</exception>
     /// <remarks>
     /// <para><b>Example usage in ASP.NET Core:</b></para>

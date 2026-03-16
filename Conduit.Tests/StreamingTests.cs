@@ -39,7 +39,7 @@ public class StreamingTests
     public async Task CreateStream_ReturnsAsyncEnumerable()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<StreamingTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<StreamingTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -57,7 +57,7 @@ public class StreamingTests
     public async Task CreateStream_WithBehavior_TransformsResults()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<StreamingTests>();
             cfg.AddStreamBehavior<DoublingStreamBehavior>();
@@ -79,7 +79,7 @@ public class StreamingTests
     public async Task CreateStream_SupportsCancellation()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<StreamingTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<StreamingTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();

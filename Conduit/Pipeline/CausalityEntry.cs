@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Represents an entry in the causality chain, tracking request parent-child relationships.

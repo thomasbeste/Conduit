@@ -5,13 +5,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <RootNamespace>Conduit</RootNamespace>
-    <AssemblyName>Conduit</AssemblyName>
+    <RootNamespace>Conduit.Mediator</RootNamespace>
+    <AssemblyName>Conduit.Mediator</AssemblyName>
 
     <!-- NuGet Package Metadata -->
-    <PackageId>Conduit</PackageId>
+    <PackageId>Conduit.Mediator</PackageId>
     <Authors>thomasbeste</Authors>
-    <Description>A lightweight mediator library for .NET. Like MediatR, but without the licensing drama.</Description>
+    <Description>A lightweight mediator library for .NET. Like MediatR, but without the licensing drama. Part of the Conduit family.</Description>
     <PackageTags>mediator;cqrs;pipeline;request;handler;notification</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>

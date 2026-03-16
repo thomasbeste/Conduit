@@ -1,9 +1,9 @@
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Conduit;
+namespace Conduit.Mediator;
 
-public class ConduitConfiguration
+public class MediatorConfiguration
 {
     public ServiceLifetime Lifetime { get; set; } = ServiceLifetime.Transient;
 
@@ -37,42 +37,42 @@ public class ConduitConfiguration
 
     internal List<Type> StreamBehaviorTypes { get; } = [];
 
-    public ConduitConfiguration RegisterServicesFromAssembly(Assembly assembly)
+    public MediatorConfiguration RegisterServicesFromAssembly(Assembly assembly)
     {
         AssembliesToRegister.Add(assembly);
         return this;
     }
 
-    public ConduitConfiguration RegisterServicesFromAssemblies(params Assembly[] assemblies)
+    public MediatorConfiguration RegisterServicesFromAssemblies(params Assembly[] assemblies)
     {
         AssembliesToRegister.AddRange(assemblies);
         return this;
     }
 
-    public ConduitConfiguration RegisterServicesFromAssemblyContaining<T>()
+    public MediatorConfiguration RegisterServicesFromAssemblyContaining<T>()
     {
         return RegisterServicesFromAssembly(typeof(T).Assembly);
     }
 
-    public ConduitConfiguration RegisterServicesFromAssemblyContaining(Type type)
+    public MediatorConfiguration RegisterServicesFromAssemblyContaining(Type type)
     {
         return RegisterServicesFromAssembly(type.Assembly);
     }
 
-    public ConduitConfiguration AddBehavior<TBehavior>()
+    public MediatorConfiguration AddBehavior<TBehavior>()
         where TBehavior : class
     {
         BehaviorTypes.Add(typeof(TBehavior));
         return this;
     }
 
-    public ConduitConfiguration AddBehavior(Type behaviorType)
+    public MediatorConfiguration AddBehavior(Type behaviorType)
     {
         BehaviorTypes.Add(behaviorType);
         return this;
     }
 
-    public ConduitConfiguration AddOpenBehavior(Type openBehaviorType)
+    public MediatorConfiguration AddOpenBehavior(Type openBehaviorType)
     {
         if (!openBehaviorType.IsGenericTypeDefinition)
         {
@@ -83,14 +83,14 @@ public class ConduitConfiguration
         return this;
     }
 
-    public ConduitConfiguration AddPreProcessor<TPreProcessor>()
+    public MediatorConfiguration AddPreProcessor<TPreProcessor>()
         where TPreProcessor : class
     {
         PreProcessorTypes.Add(typeof(TPreProcessor));
         return this;
     }
 
-    public ConduitConfiguration AddOpenPreProcessor(Type openPreProcessorType)
+    public MediatorConfiguration AddOpenPreProcessor(Type openPreProcessorType)
     {
         if (!openPreProcessorType.IsGenericTypeDefinition)
         {
@@ -101,14 +101,14 @@ public class ConduitConfiguration
         return this;
     }
 
-    public ConduitConfiguration AddPostProcessor<TPostProcessor>()
+    public MediatorConfiguration AddPostProcessor<TPostProcessor>()
         where TPostProcessor : class
     {
         PostProcessorTypes.Add(typeof(TPostProcessor));
         return this;
     }
 
-    public ConduitConfiguration AddOpenPostProcessor(Type openPostProcessorType)
+    public MediatorConfiguration AddOpenPostProcessor(Type openPostProcessorType)
     {
         if (!openPostProcessorType.IsGenericTypeDefinition)
         {
@@ -119,14 +119,14 @@ public class ConduitConfiguration
         return this;
     }
 
-    public ConduitConfiguration AddExceptionHandler<TExceptionHandler>()
+    public MediatorConfiguration AddExceptionHandler<TExceptionHandler>()
         where TExceptionHandler : class
     {
         ExceptionHandlerTypes.Add(typeof(TExceptionHandler));
         return this;
     }
 
-    public ConduitConfiguration AddOpenExceptionHandler(Type openExceptionHandlerType)
+    public MediatorConfiguration AddOpenExceptionHandler(Type openExceptionHandlerType)
     {
         if (!openExceptionHandlerType.IsGenericTypeDefinition)
         {
@@ -137,14 +137,14 @@ public class ConduitConfiguration
         return this;
     }
 
-    public ConduitConfiguration AddStreamBehavior<TStreamBehavior>()
+    public MediatorConfiguration AddStreamBehavior<TStreamBehavior>()
         where TStreamBehavior : class
     {
         StreamBehaviorTypes.Add(typeof(TStreamBehavior));
         return this;
     }
 
-    public ConduitConfiguration AddOpenStreamBehavior(Type openStreamBehaviorType)
+    public MediatorConfiguration AddOpenStreamBehavior(Type openStreamBehaviorType)
     {
         if (!openStreamBehaviorType.IsGenericTypeDefinition)
         {

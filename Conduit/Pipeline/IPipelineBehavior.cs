@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Delegate representing the next step in the pipeline (either another behavior or the handler).

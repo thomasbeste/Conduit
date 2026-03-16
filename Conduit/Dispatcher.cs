@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Default implementation of <see cref="IDispatcher"/> that routes requests to their handlers

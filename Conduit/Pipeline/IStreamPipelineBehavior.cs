@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 public delegate IAsyncEnumerable<TResponse> StreamHandlerDelegate<out TResponse>();
 

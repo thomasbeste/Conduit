@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Optional pipeline context that accumulates data across multiple Send() calls.

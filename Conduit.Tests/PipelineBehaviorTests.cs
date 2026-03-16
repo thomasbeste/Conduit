@@ -50,7 +50,7 @@ public class PipelineBehaviorTests
     public async Task Pipeline_SingleBehavior_TransformsResult()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineBehaviorTests>();
             cfg.AddBehavior<DoubleItBehavior>();
@@ -68,7 +68,7 @@ public class PipelineBehaviorTests
     public async Task Pipeline_MultipleBehaviors_ExecuteInOrder()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineBehaviorTests>();
             cfg.AddBehavior<DoubleItBehavior>();  // Outer (last in chain): (result + 10) * 2
@@ -92,7 +92,7 @@ public class PipelineBehaviorTests
         LoggingBehavior<GetValue, int>.Logs.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<PipelineBehaviorTests>();
             cfg.AddOpenBehavior(typeof(LoggingBehavior<,>));

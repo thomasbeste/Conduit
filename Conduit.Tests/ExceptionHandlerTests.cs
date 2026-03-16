@@ -52,7 +52,7 @@ public class ExceptionHandlerTests
     public async Task ExceptionHandler_HandlesException_ReturnsRecoveredResponse()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<ExceptionHandlerTests>();
             cfg.AddExceptionHandler<InvalidOperationExceptionHandler>();
@@ -70,7 +70,7 @@ public class ExceptionHandlerTests
     public async Task ExceptionHandler_NoException_ReturnsNormalResponse()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<ExceptionHandlerTests>();
             cfg.AddExceptionHandler<InvalidOperationExceptionHandler>();
@@ -90,7 +90,7 @@ public class ExceptionHandlerTests
         GenericExceptionHandler.HandleCount = 0;
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<ExceptionHandlerTests>();
             cfg.AddExceptionHandler<GenericExceptionHandler>();

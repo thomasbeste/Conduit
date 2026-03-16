@@ -1,3 +1,3 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 public interface IStreamRequest<out TResponse>;

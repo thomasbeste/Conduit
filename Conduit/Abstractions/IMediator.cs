@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Combines ISender and IPublisher for request dispatch and notification publishing.

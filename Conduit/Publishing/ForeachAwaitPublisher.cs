@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Publishes notifications to handlers sequentially, awaiting each handler before proceeding to the next.

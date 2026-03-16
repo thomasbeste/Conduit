@@ -139,7 +139,7 @@ public class CausalityAndBaggageTests
     public async Task Baggage_AvailableInHandler()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
         });
@@ -161,7 +161,7 @@ public class CausalityAndBaggageTests
     public async Task Baggage_PropagatesAcrossNestedRequests()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
         });
@@ -188,7 +188,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_SingleRequest_GeneratesRequestId()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = true;
@@ -214,7 +214,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_NestedRequests_TracksParentChild()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = true;
@@ -243,7 +243,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_DeepNesting_TracksFullChain()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = true;
@@ -285,7 +285,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_SequentialRequests_EachHasOwnId()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = true;
@@ -317,7 +317,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_WithBaggageRequestId_UsesBaggageValue()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = true;
@@ -344,7 +344,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_Disabled_NoTracking()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = false; // Explicitly disabled
@@ -367,7 +367,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_DisabledContext_GracefullyNoOps()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnablePipelineContext = false;
@@ -387,7 +387,7 @@ public class CausalityAndBaggageTests
     public async Task Causality_ParallelRequests_ThreadSafe()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<CausalityAndBaggageTests>();
             cfg.EnableCausalityTracking = true;

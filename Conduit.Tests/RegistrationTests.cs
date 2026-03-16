@@ -5,10 +5,10 @@ namespace Conduit.Tests;
 public class RegistrationTests
 {
     [Fact]
-    public void AddConduit_RegistersIDispatcher()
+    public void AddMediator_RegistersIDispatcher()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => { });
+        services.AddMediator(cfg => { });
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetService<IDispatcher>();
@@ -18,10 +18,10 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void AddConduit_RegistersISender()
+    public void AddMediator_RegistersISender()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => { });
+        services.AddMediator(cfg => { });
 
         var provider = services.BuildServiceProvider();
         var sender = provider.GetService<ISender>();
@@ -30,10 +30,10 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void AddConduit_RegistersIPublisher()
+    public void AddMediator_RegistersIPublisher()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => { });
+        services.AddMediator(cfg => { });
 
         var provider = services.BuildServiceProvider();
         var publisher = provider.GetService<IPublisher>();
@@ -42,10 +42,10 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void AddConduit_DefaultsToForeachAwaitPublisher()
+    public void AddMediator_DefaultsToForeachAwaitPublisher()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => { });
+        services.AddMediator(cfg => { });
 
         var provider = services.BuildServiceProvider();
         var publisher = provider.GetService<INotificationPublisher>();
@@ -55,10 +55,10 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void AddConduit_CanConfigureTaskWhenAllPublisher()
+    public void AddMediator_CanConfigureTaskWhenAllPublisher()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.NotificationPublisherType = typeof(TaskWhenAllPublisher));
+        services.AddMediator(cfg => cfg.NotificationPublisherType = typeof(TaskWhenAllPublisher));
 
         var provider = services.BuildServiceProvider();
         var publisher = provider.GetService<INotificationPublisher>();
@@ -68,10 +68,10 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void AddConduit_CanConfigureLifetime()
+    public void AddMediator_CanConfigureLifetime()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.Lifetime = ServiceLifetime.Singleton);
+        services.AddMediator(cfg => cfg.Lifetime = ServiceLifetime.Singleton);
 
         // Verify that the same instance is returned
         var provider = services.BuildServiceProvider();
@@ -82,10 +82,10 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void AddConduit_ScansAssemblyForHandlers()
+    public void AddMediator_ScansAssemblyForHandlers()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<RegistrationTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<RegistrationTests>());
 
         var provider = services.BuildServiceProvider();
 
@@ -97,7 +97,7 @@ public class RegistrationTests
     [Fact]
     public void AddOpenBehavior_ThrowsForNonGenericType()
     {
-        var config = new ConduitConfiguration();
+        var config = new MediatorConfiguration();
 
         Assert.Throws<ArgumentException>(() => config.AddOpenBehavior(typeof(string)));
     }
@@ -111,7 +111,7 @@ public class RegistrationTests
     public void ValidateConduitRegistrations_PassesWhenNoRequestTypes()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => { });
+        services.AddMediator(cfg => { });
 
         var provider = services.BuildServiceProvider();
 
@@ -124,7 +124,7 @@ public class RegistrationTests
     {
         var services = new ServiceCollection();
         // Don't register handlers from the test assembly
-        services.AddConduit(cfg => { });
+        services.AddMediator(cfg => { });
 
         var provider = services.BuildServiceProvider();
 
@@ -141,7 +141,7 @@ public class RegistrationTests
     {
         var services = new ServiceCollection();
         // Register handlers from test assembly
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<RegistrationTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<RegistrationTests>());
 
         var provider = services.BuildServiceProvider();
 
@@ -160,7 +160,7 @@ public class RegistrationTests
     public void ValidateConduitRegistrations_ReportsMultipleMissingHandlers()
     {
         var services = new ServiceCollection();
-        services.AddConduit(cfg => { }); // No handlers registered
+        services.AddMediator(cfg => { }); // No handlers registered
 
         var provider = services.BuildServiceProvider();
 

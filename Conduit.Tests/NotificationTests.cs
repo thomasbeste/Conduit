@@ -35,7 +35,7 @@ public class NotificationTests
         LoggingHandler.Logs.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<NotificationTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<NotificationTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -55,7 +55,7 @@ public class NotificationTests
         LoggingHandler.Logs.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg => cfg.RegisterServicesFromAssemblyContaining<NotificationTests>());
+        services.AddMediator(cfg => cfg.RegisterServicesFromAssemblyContaining<NotificationTests>());
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -71,7 +71,7 @@ public class NotificationTests
     public async Task Publish_NoHandlers_DoesNotThrow()
     {
         var services = new ServiceCollection();
-        services.AddConduit(_ => { }); // No handlers
+        services.AddMediator(_ => { }); // No handlers
 
         var provider = services.BuildServiceProvider();
         var dispatcher = provider.GetRequiredService<IDispatcher>();
@@ -87,7 +87,7 @@ public class NotificationTests
         LoggingHandler.Logs.Clear();
 
         var services = new ServiceCollection();
-        services.AddConduit(cfg =>
+        services.AddMediator(cfg =>
         {
             cfg.RegisterServicesFromAssemblyContaining<NotificationTests>();
             cfg.NotificationPublisherType = typeof(TaskWhenAllPublisher);

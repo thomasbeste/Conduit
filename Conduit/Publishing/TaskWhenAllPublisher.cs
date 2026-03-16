@@ -1,4 +1,4 @@
-namespace Conduit;
+namespace Conduit.Mediator;
 
 /// <summary>
 /// Publishes notifications to all handlers in parallel using <see cref="Task.WhenAll"/>.
