@@ -20,6 +20,7 @@ public sealed class RabbitMqConsumerHost
     private readonly RabbitMqSettings _settings;
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger _logger;
+    private readonly Func<Action<object, Type>?> _getOnMessageConsumed;
     private string? _consumerTag;
 
     public RabbitMqConsumerHost(
@@ -28,7 +29,8 @@ public sealed class RabbitMqConsumerHost
         string serviceName,
         RabbitMqSettings settings,
         IServiceProvider serviceProvider,
-        ILogger logger)
+        ILogger logger,
+        Func<Action<object, Type>?>? getOnMessageConsumed = null)
     {
         _channel = channel;
         _registration = registration;
@@ -36,6 +38,7 @@ public sealed class RabbitMqConsumerHost
         _settings = settings;
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _getOnMessageConsumed = getOnMessageConsumed ?? (() => null);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -117,14 +120,10 @@ public sealed class RabbitMqConsumerHost
             }
 
             var consumerInstance = scope.ServiceProvider.GetRequiredService(_registration.ConsumerType);
-
-            // Call ConsumeAsync via the IMessageConsumer<T> interface
-            var consumerInterface = typeof(IMessageConsumer<>).MakeGenericType(_registration.MessageType);
-            var consumeMethod = consumerInterface.GetMethod(nameof(IMessageConsumer<object>.ConsumeAsync))!;
-
-            await (Task)consumeMethod.Invoke(consumerInstance, [message, context, CancellationToken.None])!;
+            await _registration.GetDispatcher().DispatchAsync(consumerInstance, message, context, CancellationToken.None);
 
             await _channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
+            _getOnMessageConsumed()?.Invoke(message, _registration.MessageType);
         }
         catch (Exception ex)
         {
@@ -153,17 +152,17 @@ public sealed class RabbitMqConsumerHost
         return ea.Redelivered ? 1 : 0;
     }
 
-    private static IReadOnlyDictionary<string, object>? ParseHeaders(IDictionary<string, object?>? headers)
+    private static IReadOnlyDictionary<string, string>? ParseHeaders(IDictionary<string, object?>? headers)
     {
         if (headers == null || headers.Count == 0) return null;
 
-        var result = new Dictionary<string, object>();
+        var result = new Dictionary<string, string>();
         foreach (var (key, value) in headers)
         {
             if (value is byte[] bytes)
                 result[key] = Encoding.UTF8.GetString(bytes);
             else if (value != null)
-                result[key] = value;
+                result[key] = value.ToString()!;
         }
         return result;
     }

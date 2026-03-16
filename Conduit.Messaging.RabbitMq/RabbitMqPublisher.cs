@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Conduit.Messaging.Serialization;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
@@ -13,9 +14,9 @@ public sealed class RabbitMqPublisher(
     ILogger logger) : IMessagePublisher, IAsyncDisposable
 {
     /// <summary>
-    /// Tracks exchanges that have been declared on this channel.
+    /// Tracks exchanges that have been declared on this channel. Thread-safe for concurrent publish calls.
     /// </summary>
-    private readonly HashSet<string> _declaredExchanges = [];
+    private readonly ConcurrentDictionary<string, bool> _declaredExchanges = new();
 
     public Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
         where TMessage : class
@@ -101,7 +102,7 @@ public sealed class RabbitMqPublisher(
 
     private async Task EnsureExchangeDeclaredAsync(string exchangeName, string type, CancellationToken cancellationToken)
     {
-        if (_declaredExchanges.Add(exchangeName))
+        if (_declaredExchanges.TryAdd(exchangeName, true))
         {
             await channel.ExchangeDeclareAsync(exchangeName, type, durable: true, autoDelete: false, cancellationToken: cancellationToken);
         }

@@ -16,6 +16,18 @@ public sealed class InMemoryMessageBus : IMessageBus
     private readonly IServiceProvider _serviceProvider;
     private bool _started;
 
+    /// <summary>
+    /// Optional callback invoked after a message is successfully consumed.
+    /// Used by test infrastructure to observe message consumption.
+    /// </summary>
+    public Action<object, Type>? OnMessageConsumed { get; set; }
+
+    /// <summary>
+    /// Optional callback invoked after a message is published.
+    /// Used by test infrastructure to observe message publishing.
+    /// </summary>
+    public Action<object, Type>? OnMessagePublished { get; set; }
+
     public InMemoryMessageBus(IServiceProvider serviceProvider)
     {
         _serviceProvider = serviceProvider;
@@ -58,12 +70,13 @@ public sealed class InMemoryMessageBus : IMessageBus
     {
         var messageType = message.GetType();
         _published.Add(new PublishedMessageRecord(message, messageType, DateTime.UtcNow));
+        OnMessagePublished?.Invoke(message, messageType);
 
         var context = new MessageContext
         {
             MessageId = Guid.NewGuid(),
             SentTime = DateTime.UtcNow,
-            Headers = contextHeaders?.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
+            Headers = contextHeaders
         };
 
         foreach (var binding in _bindings.Where(b => b.MessageType.IsAssignableFrom(messageType)))
@@ -82,13 +95,10 @@ public sealed class InMemoryMessageBus : IMessageBus
             }
 
             var consumer = scope.ServiceProvider.GetRequiredService(binding.ConsumerType);
-
-            var consumerInterface = typeof(IMessageConsumer<>).MakeGenericType(binding.MessageType);
-            var consumeMethod = consumerInterface.GetMethod(nameof(IMessageConsumer<object>.ConsumeAsync))!;
-
-            await (Task)consumeMethod.Invoke(consumer, [message, context, cancellationToken])!;
+            await binding.GetDispatcher().DispatchAsync(consumer, message, context, cancellationToken);
 
             _consumed.Add(new ConsumedMessageRecord(message, messageType, binding.ConsumerType, DateTime.UtcNow));
+            OnMessageConsumed?.Invoke(message, messageType);
         }
     }
 
@@ -154,4 +164,13 @@ public sealed class InMemoryMessageBus : IMessageBus
 public record PublishedMessageRecord(object Message, Type MessageType, DateTime Timestamp);
 public record ConsumedMessageRecord(object Message, Type MessageType, Type ConsumerType, DateTime Timestamp);
 
-internal record ConsumerBinding(Type MessageType, Type ConsumerType);
+internal sealed class ConsumerBinding(Type messageType, Type consumerType)
+{
+    public Type MessageType { get; } = messageType;
+    public Type ConsumerType { get; } = consumerType;
+
+    private ConsumerDispatcher? _dispatcher;
+
+    public ConsumerDispatcher GetDispatcher()
+        => _dispatcher ??= ConsumerRegistration.CreateDispatcher(MessageType);
+}

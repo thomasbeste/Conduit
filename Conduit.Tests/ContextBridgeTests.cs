@@ -105,7 +105,7 @@ public class ContextBridgeTests
         var messageContext = new MessageContext
         {
             MessageId = Guid.NewGuid(),
-            Headers = headers.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
+            Headers = headers
         };
 
         var target = new PipelineContext();

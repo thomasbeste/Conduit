@@ -42,7 +42,20 @@ public sealed class MessageBusHealth
     public required string Status { get; init; }
 
     /// <summary>
-    /// Additional diagnostic details.
+    /// Typed diagnostic details about the bus connection.
     /// </summary>
-    public Dictionary<string, object>? Details { get; init; }
+    public MessageBusHealthDetails? Details { get; init; }
+}
+
+/// <summary>
+/// Strongly-typed diagnostic details for a message bus connection.
+/// </summary>
+public sealed class MessageBusHealthDetails
+{
+    public required string Service { get; init; }
+    public string? Host { get; init; }
+    public int? Port { get; init; }
+    public string? VirtualHost { get; init; }
+    public int ConsumerCount { get; init; }
+    public bool Started { get; init; }
 }

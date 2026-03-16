@@ -38,7 +38,7 @@ public sealed class MessageContext
     /// <summary>
     /// Headers/metadata associated with the message.
     /// </summary>
-    public IReadOnlyDictionary<string, object>? Headers { get; init; }
+    public IReadOnlyDictionary<string, string>? Headers { get; init; }
 
     /// <summary>
     /// Number of times this message has been delivered (for retry tracking).

@@ -65,27 +65,27 @@ public static class PipelineContextBridge
         // Restore baggage
         foreach (var (key, value) in messageContext.Headers)
         {
-            if (key.StartsWith(BaggagePrefix, StringComparison.Ordinal) && value is string strValue)
+            if (key.StartsWith(BaggagePrefix, StringComparison.Ordinal))
             {
                 var baggageKey = key[BaggagePrefix.Length..];
-                context.SetBaggage(baggageKey, strValue);
+                context.SetBaggage(baggageKey, value);
             }
         }
 
         // Restore correlation ID into baggage
-        if (messageContext.Headers.TryGetValue(CorrelationIdHeader, out var corrId) && corrId is string corrIdStr)
+        if (messageContext.Headers.TryGetValue(CorrelationIdHeader, out var corrId))
         {
-            context.SetBaggage("correlation_id", corrIdStr);
+            context.SetBaggage("correlation_id", corrId);
         }
 
         // Restore origin request ID — the consumer's causality chain starts here
-        if (messageContext.Headers.TryGetValue(OriginRequestIdHeader, out var originId) && originId is string originIdStr)
+        if (messageContext.Headers.TryGetValue(OriginRequestIdHeader, out var originId))
         {
-            context.SetBaggage("origin_request_id", originIdStr);
+            context.SetBaggage("origin_request_id", originId);
         }
 
         // Restore causality chain from the publishing process
-        if (messageContext.Headers.TryGetValue(CausalityChainHeader, out var chainStr) && chainStr is string chainData)
+        if (messageContext.Headers.TryGetValue(CausalityChainHeader, out var chainData))
         {
             var entries = ParseCausalityChain(chainData);
             foreach (var entry in entries)
@@ -97,7 +97,7 @@ public static class PipelineContextBridge
         // Record the message consumption as a new causality entry
         context.RecordCausality(
             messageContext.MessageId.ToString("N")[..8],
-            messageContext.Headers.TryGetValue(OriginRequestIdHeader, out var parentId) ? parentId?.ToString() : null,
+            messageContext.Headers.TryGetValue(OriginRequestIdHeader, out var parentId) ? parentId : null,
             $"[consume] {messageContext.DestinationAddress ?? "unknown"}"
         );
     }
@@ -109,11 +109,10 @@ public static class PipelineContextBridge
     {
         if (headers is null) return;
 
-        // Create a minimal MessageContext wrapper for reuse
         var messageContext = new MessageContext
         {
             MessageId = Guid.NewGuid(),
-            Headers = headers.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
+            Headers = headers
         };
 
         HydrateContext(context, messageContext);

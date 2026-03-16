@@ -24,6 +24,12 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
     private readonly ConcurrentBag<RabbitMqConsumerHost> _consumerHosts = [];
     private bool _started;
 
+    /// <summary>
+    /// Optional callback invoked after a message is successfully consumed.
+    /// Used by test infrastructure to observe message consumption.
+    /// </summary>
+    public Action<object, Type>? OnMessageConsumed { get; set; }
+
     public RabbitMqMessageBus(
         RabbitMqSettings settings,
         string serviceName,
@@ -90,7 +96,8 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
                 _serviceName,
                 _settings,
                 _serviceProvider,
-                _logger);
+                _logger,
+                () => OnMessageConsumed);
 
             await host.StartAsync(cancellationToken);
             _consumerHosts.Add(host);
@@ -136,14 +143,14 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
         {
             IsHealthy = isHealthy,
             Status = isHealthy ? "Connected" : "Disconnected",
-            Details = new Dictionary<string, object>
+            Details = new MessageBusHealthDetails
             {
-                ["service"] = _serviceName,
-                ["host"] = _settings.Host,
-                ["port"] = _settings.Port,
-                ["virtualHost"] = _settings.VirtualHost,
-                ["consumerCount"] = _consumerRegistrations.Count,
-                ["started"] = _started
+                Service = _serviceName,
+                Host = _settings.Host,
+                Port = _settings.Port,
+                VirtualHost = _settings.VirtualHost,
+                ConsumerCount = _consumerRegistrations.Count,
+                Started = _started
             }
         };
     }
