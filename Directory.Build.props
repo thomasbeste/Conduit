@@ -18,6 +18,9 @@
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/thomasbeste/Conduit</PackageProjectUrl>
 
+    <!-- MinVer: tags use v prefix (e.g., v1.0.0) -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+
     <!-- SourceLink for debugging -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
