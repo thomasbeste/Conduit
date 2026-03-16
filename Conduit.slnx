@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Conduit/Conduit.csproj" />
+  <Folder Name="/Tests/">
+    <Project Path="Conduit.Tests/Conduit.Tests.csproj" />
+  </Folder>
+</Solution>
