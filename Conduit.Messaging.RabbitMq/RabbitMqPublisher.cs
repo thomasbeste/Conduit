@@ -1,7 +1,4 @@
-using Conduit.Mediator;
-using Conduit.Messaging.Bridge;
 using Conduit.Messaging.Serialization;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 
@@ -9,12 +6,10 @@ namespace Conduit.Messaging.RabbitMq;
 
 /// <summary>
 /// RabbitMQ implementation of IMessagePublisher.
-/// Publishes to type-based fanout exchanges. When an <see cref="IPipelineContext"/> is available
-/// in the current DI scope, automatically propagates baggage and causality chain to message headers.
+/// Publishes to type-based fanout exchanges.
 /// </summary>
 public sealed class RabbitMqPublisher(
     IChannel channel,
-    IServiceProvider serviceProvider,
     ILogger logger) : IMessagePublisher, IAsyncDisposable
 {
     /// <summary>
@@ -22,14 +17,18 @@ public sealed class RabbitMqPublisher(
     /// </summary>
     private readonly HashSet<string> _declaredExchanges = [];
 
-    public async Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
+    public Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
+        where TMessage : class
+        => PublishAsync(message, (IReadOnlyDictionary<string, string>?)null, cancellationToken);
+
+    public async Task PublishAsync<TMessage>(TMessage message, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken = default)
         where TMessage : class
     {
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
         await EnsureExchangeDeclaredAsync(exchangeName, cancellationToken);
 
-        var contextHeaders = ExtractContextHeaders();
-        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, contextHeaders);
+        var headers = contextHeaders is not null ? new Dictionary<string, string>(contextHeaders) : null;
+        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, headers);
         var properties = new BasicProperties
         {
             ContentType = "application/json",
@@ -44,14 +43,18 @@ public sealed class RabbitMqPublisher(
         logger.LogDebug("Published {MessageType} to exchange {Exchange}", typeof(TMessage).Name, exchangeName);
     }
 
-    public async Task PublishAsync<TMessage>(TMessage message, string topic, CancellationToken cancellationToken = default)
+    public Task PublishAsync<TMessage>(TMessage message, string topic, CancellationToken cancellationToken = default)
+        where TMessage : class
+        => PublishAsync(message, topic, null, cancellationToken);
+
+    public async Task PublishAsync<TMessage>(TMessage message, string topic, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken = default)
         where TMessage : class
     {
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
         await EnsureExchangeDeclaredAsync(exchangeName, "topic", cancellationToken);
 
-        var contextHeaders = ExtractContextHeaders();
-        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, contextHeaders);
+        var headers = contextHeaders is not null ? new Dictionary<string, string>(contextHeaders) : null;
+        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, headers);
         var properties = new BasicProperties
         {
             ContentType = "application/json",
@@ -67,11 +70,15 @@ public sealed class RabbitMqPublisher(
             typeof(TMessage).Name, exchangeName, topic);
     }
 
-    public async Task SendAsync<TMessage>(TMessage message, string queueName, CancellationToken cancellationToken = default)
+    public Task SendAsync<TMessage>(TMessage message, string queueName, CancellationToken cancellationToken = default)
+        where TMessage : class
+        => SendAsync(message, queueName, null, cancellationToken);
+
+    public async Task SendAsync<TMessage>(TMessage message, string queueName, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken = default)
         where TMessage : class
     {
-        var contextHeaders = ExtractContextHeaders();
-        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, contextHeaders);
+        var headers = contextHeaders is not null ? new Dictionary<string, string>(contextHeaders) : null;
+        var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, headers);
         var properties = new BasicProperties
         {
             ContentType = "application/json",
@@ -85,24 +92,6 @@ public sealed class RabbitMqPublisher(
         await channel.BasicPublishAsync("", routingKey: queueName, mandatory: false, properties, body, cancellationToken);
 
         logger.LogDebug("Sent {MessageType} to queue {Queue}", typeof(TMessage).Name, queueName);
-    }
-
-    /// <summary>
-    /// Attempts to resolve IPipelineContext from the current DI scope and extract headers.
-    /// Returns null if no pipeline context is available (graceful degradation).
-    /// </summary>
-    private Dictionary<string, string>? ExtractContextHeaders()
-    {
-        try
-        {
-            var pipelineContext = serviceProvider.GetService<IPipelineContext>();
-            return pipelineContext is not null ? PipelineContextBridge.ExtractHeaders(pipelineContext) : null;
-        }
-        catch
-        {
-            // Gracefully handle cases where we're outside a DI scope
-            return null;
-        }
     }
 
     private async Task EnsureExchangeDeclaredAsync(string exchangeName, CancellationToken cancellationToken)

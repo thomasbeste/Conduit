@@ -76,7 +76,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
 
         // Create publisher channel
         var publishChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
-        _publisher = new RabbitMqPublisher(publishChannel, _serviceProvider, _logger);
+        _publisher = new RabbitMqPublisher(publishChannel, _logger);
 
         // Create consumer hosts
         foreach (var reg in _consumerRegistrations)
@@ -152,13 +152,4 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
     {
         await StopAsync();
     }
-}
-
-/// <summary>
-/// Registration of a consumer type and its message type.
-/// </summary>
-public sealed class ConsumerRegistration
-{
-    public required Type ConsumerType { get; init; }
-    public required Type MessageType { get; init; }
 }

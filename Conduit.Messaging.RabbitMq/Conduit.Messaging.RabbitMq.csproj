@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Conduit.Messaging.RabbitMq</RootNamespace>
+    <AssemblyName>Conduit.Messaging.RabbitMq</AssemblyName>
+    <PackageId>Conduit.Messaging.RabbitMq</PackageId>
+    <Description>RabbitMQ transport provider for Conduit.Messaging.</Description>
+    <PackageTags>messaging;rabbitmq;conduit;transport</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="RabbitMQ.Client" Version="7.*" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Conduit.Messaging\Conduit.Messaging.csproj" />
+  </ItemGroup>
+
+</Project>

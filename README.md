@@ -1,12 +1,31 @@
 # Conduit
 
-A lightweight mediator library for .NET 10. Like MediatR, but without the licensing drama.
+A lightweight mediator + messaging library for .NET 10. Like MediatR and MassTransit, but without the licensing drama.
+
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `Conduit` | In-process mediator — request/response, notifications, streaming, pipeline behaviors, causality tracking |
+| `Conduit.Messaging` | Cross-process messaging abstractions — publisher/consumer interfaces, serialization, pipeline context bridge, in-memory transport |
+| `Conduit.Messaging.RabbitMq` | RabbitMQ transport provider for Conduit.Messaging |
 
 ## Installation
 
 ```bash
+# Mediator only
 dotnet add package Conduit
+
+# Messaging (includes Conduit core)
+dotnet add package Conduit.Messaging
+
+# RabbitMQ transport
+dotnet add package Conduit.Messaging.RabbitMq
 ```
+
+---
+
+# Conduit (Mediator)
 
 ## Quick Start
 
@@ -359,6 +378,226 @@ services.AddMediator(cfg =>
     cfg.AddStreamBehavior(typeof(StreamLoggingBehavior<,>));
 });
 ```
+
+---
+
+# Conduit.Messaging
+
+Cross-process messaging with pluggable transport providers. Define message contracts once, swap transports without changing application code.
+
+## Quick Start
+
+### Define a message
+
+```csharp
+public record OrderPlaced : EventMessage
+{
+    public required string OrderId { get; init; }
+    public required decimal Total { get; init; }
+}
+```
+
+Three base types are provided:
+- `EventMessage` — something happened (pub/sub, fan-out)
+- `CommandMessage` — do something (point-to-point)
+- `QueryMessage` — request data (point-to-point)
+
+All include `MessageId`, `CreatedAt`, `CorrelationId`, `TenantId`, `SessionId`, `UserId`, and `Metadata`.
+
+### Define a consumer
+
+```csharp
+public class OrderPlacedConsumer : IMessageConsumer<OrderPlaced>
+{
+    public async Task ConsumeAsync(
+        OrderPlaced message,
+        MessageContext context,
+        CancellationToken cancellationToken = default)
+    {
+        // Handle the message
+        // context.MessageId, context.CorrelationId, context.Headers available
+    }
+}
+```
+
+### Register services
+
+```csharp
+services.AddConduitMessaging(cfg =>
+{
+    cfg.ServiceName = "service-orders";
+    cfg.UseRabbitMq(settings);          // or cfg.UseInMemory() for tests
+    cfg.AddConsumer<OrderPlacedConsumer>();
+    cfg.AddConsumersFromAssembly(typeof(Program).Assembly);
+});
+```
+
+### Publish messages
+
+```csharp
+public class PlaceOrderHandler(IMessagePublisher publisher)
+{
+    public async Task Handle(PlaceOrder request, CancellationToken ct)
+    {
+        // Process order...
+
+        await publisher.PublishAsync(new OrderPlaced
+        {
+            OrderId = order.Id,
+            Total = order.Total,
+            TenantId = request.TenantId,
+            SessionId = request.SessionId,
+            UserId = request.UserId
+        }, ct);
+    }
+}
+```
+
+## Publishing Patterns
+
+```csharp
+// Pub/sub — all subscribers receive the message
+await publisher.PublishAsync(message, ct);
+
+// Topic-based routing
+await publisher.PublishAsync(message, "orders.eu", ct);
+
+// Point-to-point — exactly one consumer receives it
+await publisher.SendAsync(message, "process-payment-queue", ct);
+```
+
+All methods accept optional `IReadOnlyDictionary<string, string>? contextHeaders` for explicit cross-process context propagation:
+
+```csharp
+var headers = PipelineContextBridge.ExtractHeaders(pipelineContext);
+await publisher.PublishAsync(message, headers, ct);
+```
+
+## Transport Providers
+
+### RabbitMQ (`Conduit.Messaging.RabbitMq`)
+
+```csharp
+services.AddConduitMessaging(cfg =>
+{
+    cfg.ServiceName = "service-audit";
+    cfg.UseRabbitMq(new RabbitMqSettings
+    {
+        Host = "rabbitmq",
+        Port = 5671,
+        UseSsl = true,
+        VirtualHost = "myapp",
+        Username = "myapp",
+        Password = "secret",
+        PrefetchCount = 10,
+        RetryCount = 3
+    });
+    cfg.AddConsumersFromAssembly(typeof(Program).Assembly);
+});
+```
+
+Features:
+- **Auto-topology**: exchanges and queues declared on first use
+- **Dead-letter queues**: failed messages routed to `*.dlq` after retry limit
+- **Retry with requeue**: configurable retry count before dead-lettering
+- **Persistent delivery**: messages survive broker restart
+- **SSL/TLS**: TLS 1.2/1.3 support
+- **Auto-recovery**: reconnects on connection loss
+
+Exchange strategy:
+- `PublishAsync` → fanout exchange named `Namespace:TypeName`
+- `PublishAsync` with topic → topic exchange with routing key
+- `SendAsync` → direct to queue via default exchange
+
+### In-Memory (testing)
+
+```csharp
+services.AddConduitMessaging(cfg =>
+{
+    cfg.UseInMemory();
+    cfg.AddConsumer<OrderPlacedConsumer>();
+});
+```
+
+The in-memory transport dispatches synchronously to consumers and records all messages for assertions:
+
+```csharp
+var bus = sp.GetRequiredService<InMemoryMessageBus>();
+
+// Query recorded messages
+var published = bus.GetPublished<OrderPlaced>().ToList();
+var consumed = bus.GetConsumed<OrderPlaced>().ToList();
+
+// Wait for async consumer completion
+var result = await bus.WaitForConsume<OrderPlaced>(
+    m => m.OrderId == "123",
+    timeout: TimeSpan.FromSeconds(5));
+
+// Reset state between tests
+bus.Clear();
+```
+
+### Writing a Custom Provider
+
+Implement a transport by providing an extension method on `MessagingConfiguration`:
+
+```csharp
+public static class MyTransportExtensions
+{
+    public static void UseMyTransport(this MessagingConfiguration config, MySettings settings)
+    {
+        config.TransportRegistrar = (services, cfg) =>
+        {
+            foreach (var reg in cfg.ConsumerRegistrations)
+                services.AddScoped(reg.ConsumerType);
+
+            services.AddSingleton<IMessageBus>(sp =>
+                new MyMessageBus(settings, cfg.ConsumerRegistrations, sp));
+
+            services.AddSingleton<IMessagePublisher>(sp =>
+                sp.GetRequiredService<IMessageBus>().Publisher);
+        };
+    }
+}
+```
+
+The `MessageBusHostedService` is registered by the core and will call `StartAsync`/`StopAsync` on your `IMessageBus` automatically.
+
+## Pipeline Context Bridge
+
+When `IPipelineContext` is enabled in the mediator, the bridge propagates context (baggage, causality chain, correlation ID) across process boundaries via message headers.
+
+### Publishing side — extract context into headers
+
+```csharp
+var headers = PipelineContextBridge.ExtractHeaders(pipelineContext);
+await publisher.PublishAsync(message, headers, ct);
+```
+
+Serialized headers:
+- `conduit.baggage.*` — arbitrary key-value pairs
+- `conduit.correlation-id` — correlation ID for tracing
+- `conduit.origin-request-id` — publishing process request ID
+- `conduit.causality-chain` — pipe-delimited causality entries
+
+### Consumer side — automatic hydration
+
+Both RabbitMQ and in-memory transports automatically hydrate `IPipelineContext` in the consumer's DI scope before invoking the consumer. No manual code needed — baggage, correlation, and causality are restored transparently.
+
+## Serialization
+
+Messages are wrapped in a JSON envelope for transport:
+
+```json
+{
+    "messageType": "MyApp.Orders.OrderPlaced",
+    "payload": { "orderId": "123", "total": 99.99 },
+    "headers": { "conduit.baggage.tenant-id": "acme" },
+    "timestamp": "2026-03-16T10:30:00Z"
+}
+```
+
+Exchange names: `Namespace:TypeName`. Queue names: `serviceName:ConsumerTypeName`.
 
 ## License
 

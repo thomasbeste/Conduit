@@ -1,0 +1,36 @@
+name: Publish to NuGet
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for MinVer
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore Conduit.slnx
+
+      - name: Build
+        run: dotnet build Conduit.slnx --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test Conduit.slnx --no-build --configuration Release
+
+      - name: Pack
+        run: |
+          dotnet pack Conduit/Conduit.csproj --no-build --configuration Release --output ./nupkgs
+          dotnet pack Conduit.Messaging/Conduit.Messaging.csproj --no-build --configuration Release --output ./nupkgs
+          dotnet pack Conduit.Messaging.RabbitMq/Conduit.Messaging.RabbitMq.csproj --no-build --configuration Release --output ./nupkgs
+
+      - name: Push to NuGet
+        run: dotnet nuget push ./nupkgs/*.nupkg --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate

@@ -1,28 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
     <RootNamespace>Conduit.Messaging</RootNamespace>
     <AssemblyName>Conduit.Messaging</AssemblyName>
-
-    <!-- NuGet Package Metadata -->
     <PackageId>Conduit.Messaging</PackageId>
-    <Authors>thomasbeste</Authors>
-    <Description>A lightweight messaging library for .NET with RabbitMQ transport. Like MassTransit, but without the licensing drama.</Description>
-    <PackageTags>messaging;rabbitmq;pubsub;consumer;publisher</PackageTags>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-
-    <!-- Repository Info -->
-    <RepositoryUrl>https://github.com/thomasbeste/Conduit</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
-    <PackageProjectUrl>https://github.com/thomasbeste/Conduit</PackageProjectUrl>
+    <Description>A lightweight messaging library for .NET with pluggable transports. Like MassTransit, but without the licensing drama.</Description>
+    <PackageTags>messaging;pubsub;consumer;publisher;conduit</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="RabbitMQ.Client" Version="7.*" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />

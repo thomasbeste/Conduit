@@ -6,6 +6,7 @@
   </Configurations>
   <Project Path="Conduit/Conduit.csproj" />
   <Project Path="Conduit.Messaging/Conduit.Messaging.csproj" />
+  <Project Path="Conduit.Messaging.RabbitMq/Conduit.Messaging.RabbitMq.csproj" />
   <Folder Name="/Tests/">
     <Project Path="Conduit.Tests/Conduit.Tests.csproj" />
     <Project Path="Conduit.Messaging.Tests/Conduit.Messaging.Tests.csproj" />

@@ -52,19 +52,12 @@ public sealed class InMemoryMessageBus : IMessageBus
 
     /// <summary>
     /// Dispatches a published message to registered consumers.
+    /// Context headers are passed explicitly from the publish call site.
     /// </summary>
-    internal async Task DispatchAsync(object message, CancellationToken cancellationToken)
+    internal async Task DispatchAsync(object message, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken)
     {
         var messageType = message.GetType();
         _published.Add(new PublishedMessageRecord(message, messageType, DateTime.UtcNow));
-
-        // Extract context headers from the publishing scope's pipeline context
-        Dictionary<string, string>? contextHeaders = null;
-        var publisherContext = _serviceProvider.GetService<IPipelineContext>();
-        if (publisherContext is not null)
-        {
-            contextHeaders = PipelineContextBridge.ExtractHeaders(publisherContext);
-        }
 
         var context = new MessageContext
         {
