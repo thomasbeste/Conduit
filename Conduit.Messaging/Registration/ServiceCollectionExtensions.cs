@@ -1,3 +1,4 @@
+using Conduit.Messaging.Bridge;
 using Conduit.Messaging.InMemory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -27,6 +28,19 @@ public static class ServiceCollectionExtensions
         {
             // Default: in-memory transport
             RegisterInMemory(services, config);
+        }
+
+        // When enabled, replace IMessagePublisher with a decorator that auto-propagates
+        // pipeline context (baggage, causality, correlation) into message headers.
+        if (config.PropagateContextHeaders)
+        {
+            var existing = services.LastOrDefault(d => d.ServiceType == typeof(IMessagePublisher));
+            if (existing is not null)
+            {
+                services.Remove(existing);
+                services.AddSingleton<IMessagePublisher>(sp =>
+                    new ContextPropagatingPublisher(sp.GetRequiredService<IMessageBus>()));
+            }
         }
 
         // Register hosted service to manage bus lifecycle
@@ -88,6 +102,12 @@ public sealed class MessagingConfiguration
     /// Service name used as queue prefix (e.g., "service-audit").
     /// </summary>
     public string ServiceName { get; set; } = "default";
+
+    /// <summary>
+    /// When true, decorates IMessagePublisher with <see cref="ContextPropagatingPublisher"/>
+    /// that automatically extracts ambient PipelineContext into message headers on every publish/send.
+    /// </summary>
+    public bool PropagateContextHeaders { get; set; }
 
     /// <summary>
     /// Configures in-memory transport (for testing).
