@@ -8,9 +8,34 @@ namespace Conduit.Mediator;
 /// <remarks>
 /// This class is registered as a scoped service, meaning one instance per DI scope (typically per HTTP request).
 /// All public methods are thread-safe for concurrent access from parallel pipeline executions.
+/// Also supports ambient (AsyncLocal) access via <see cref="Current"/> for cross-cutting concerns.
 /// </remarks>
 public sealed class PipelineContext : IPipelineContext
 {
+    private static readonly AsyncLocal<PipelineContext?> _current = new();
+
+    /// <summary>
+    /// Gets the ambient pipeline context for the current async flow.
+    /// Returns null if no context has been established.
+    /// </summary>
+    public static PipelineContext? Current => _current.Value;
+
+    /// <summary>
+    /// Sets the ambient pipeline context for the current async flow.
+    /// Returns an IDisposable that restores the previous context when disposed.
+    /// </summary>
+    public static IDisposable SetCurrent(PipelineContext context)
+    {
+        var previous = _current.Value;
+        _current.Value = context;
+        return new ContextRestorer(previous);
+    }
+
+    private sealed class ContextRestorer(PipelineContext? previous) : IDisposable
+    {
+        public void Dispose() => _current.Value = previous;
+    }
+
     private readonly List<TimingEntry> _timings = [];
     private readonly Dictionary<string, MetricEntry> _metrics = [];
     private readonly Dictionary<string, object?> _items = [];

@@ -287,4 +287,85 @@ public class PipelineContextTests
         Assert.True(elapsed2 > elapsed1);
         Assert.Equal("running", timer.Name);
     }
+
+    [Fact]
+    public void Current_StartsNull()
+    {
+        Assert.Null(PipelineContext.Current);
+    }
+
+    [Fact]
+    public void SetCurrent_SetsAndRestores()
+    {
+        Assert.Null(PipelineContext.Current);
+
+        var ctx = new PipelineContext();
+        ctx.Items["test"] = "value";
+
+        using (PipelineContext.SetCurrent(ctx))
+        {
+            Assert.Same(ctx, PipelineContext.Current);
+            Assert.Equal("value", PipelineContext.Current!.Items["test"]);
+        }
+
+        Assert.Null(PipelineContext.Current);
+    }
+
+    [Fact]
+    public void SetCurrent_NestingRestoresPrevious()
+    {
+        var outer = new PipelineContext();
+        outer.Items["level"] = "outer";
+
+        var inner = new PipelineContext();
+        inner.Items["level"] = "inner";
+
+        using (PipelineContext.SetCurrent(outer))
+        {
+            Assert.Same(outer, PipelineContext.Current);
+
+            using (PipelineContext.SetCurrent(inner))
+            {
+                Assert.Same(inner, PipelineContext.Current);
+                Assert.Equal("inner", PipelineContext.Current!.Items["level"]);
+            }
+
+            Assert.Same(outer, PipelineContext.Current);
+            Assert.Equal("outer", PipelineContext.Current!.Items["level"]);
+        }
+
+        Assert.Null(PipelineContext.Current);
+    }
+
+    [Fact]
+    public async Task Current_AsyncLocalThreadIsolation()
+    {
+        var ctx1 = new PipelineContext();
+        ctx1.Items["id"] = "thread1";
+
+        var ctx2 = new PipelineContext();
+        ctx2.Items["id"] = "thread2";
+
+        PipelineContext? seen1 = null;
+        PipelineContext? seen2 = null;
+
+        var task1 = Task.Run(() =>
+        {
+            using var _ = PipelineContext.SetCurrent(ctx1);
+            Thread.Sleep(50);
+            seen1 = PipelineContext.Current;
+        });
+
+        var task2 = Task.Run(() =>
+        {
+            using var _ = PipelineContext.SetCurrent(ctx2);
+            Thread.Sleep(50);
+            seen2 = PipelineContext.Current;
+        });
+
+        await Task.WhenAll(task1, task2);
+
+        Assert.Same(ctx1, seen1);
+        Assert.Same(ctx2, seen2);
+    }
 }

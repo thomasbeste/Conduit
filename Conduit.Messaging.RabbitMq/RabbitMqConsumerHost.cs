@@ -110,6 +110,10 @@ public sealed class RabbitMqConsumerHost
             if (pipelineContext is not null)
             {
                 PipelineContextBridge.HydrateContext(pipelineContext, context);
+
+                // Set ambient context so consumers can access it via PipelineContext.Current
+                if (pipelineContext is PipelineContext concrete)
+                    PipelineContext.SetCurrent(concrete);
             }
 
             var consumerInstance = scope.ServiceProvider.GetRequiredService(_registration.ConsumerType);

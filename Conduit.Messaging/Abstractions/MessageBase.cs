@@ -24,17 +24,17 @@ public abstract record MessageBase
     /// <summary>
     /// The tenant ID for multi-tenant scenarios.
     /// </summary>
-    public required Guid TenantId { get; init; }
+    public Guid TenantId { get; init; }
 
     /// <summary>
     /// The session ID for tracking related operations.
     /// </summary>
-    public required Guid SessionId { get; init; }
+    public Guid SessionId { get; init; }
 
     /// <summary>
     /// The user who initiated this message.
     /// </summary>
-    public required Guid UserId { get; init; }
+    public Guid UserId { get; init; }
 
     /// <summary>
     /// Optional metadata/headers for the message.
