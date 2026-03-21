@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Conduit.Messaging.AzureServiceBus</RootNamespace>
+    <AssemblyName>Conduit.Messaging.AzureServiceBus</AssemblyName>
+    <PackageId>Conduit.Messaging.AzureServiceBus</PackageId>
+    <Description>Azure Service Bus transport provider for Conduit.Messaging.</Description>
+    <PackageTags>messaging;azureservicebus;conduit;transport</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.*" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Conduit.Messaging\Conduit.Messaging.csproj" />
+  </ItemGroup>
+
+</Project>
