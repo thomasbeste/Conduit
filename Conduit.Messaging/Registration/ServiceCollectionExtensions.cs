@@ -2,6 +2,7 @@ using Conduit.Messaging.Bridge;
 using Conduit.Messaging.InMemory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace Conduit.Messaging.Registration;
 
@@ -75,10 +76,28 @@ public static class ServiceCollectionExtensions
 
 /// <summary>
 /// Hosted service that starts/stops the message bus with the application.
+/// Connects in the background so the host isn't blocked waiting for RabbitMQ.
 /// </summary>
-public sealed class MessageBusHostedService(IMessageBus bus) : IHostedService
+public sealed class MessageBusHostedService(IMessageBus bus, ILogger<MessageBusHostedService> logger) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken) => bus.StartAsync(cancellationToken);
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        // Start connection in background — don't block host startup
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await bus.StartAsync(cancellationToken);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogError(ex, "Message bus failed to start — messaging will be unavailable");
+            }
+        }, cancellationToken);
+
+        return Task.CompletedTask;
+    }
+
     public Task StopAsync(CancellationToken cancellationToken) => bus.StopAsync(cancellationToken);
 }
 

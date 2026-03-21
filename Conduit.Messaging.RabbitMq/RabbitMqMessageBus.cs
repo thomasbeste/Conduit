@@ -62,21 +62,26 @@ public sealed class RabbitMqMessageBus(
         }
 
         // Retry connection with backoff — don't crash the host if RabbitMQ isn't ready yet
+        // Uses its own cancellation (not the host's) so the host startup timeout doesn't kill retries
+        using var retryCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         const int maxRetries = 30;
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                _connection = await factory.CreateConnectionAsync(cancellationToken);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(retryCts.Token);
+                linkedCts.CancelAfter(TimeSpan.FromSeconds(10));
+                _connection = await factory.CreateConnectionAsync(linkedCts.Token);
                 logger.LogInformation("RabbitMQ connection established for {ServiceName}", serviceName);
                 break;
             }
-            catch (Exception ex) when (attempt < maxRetries && !cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (attempt < maxRetries && !retryCts.Token.IsCancellationRequested)
             {
                 var delay = Math.Min(attempt * 2, 30);
-                logger.LogWarning(ex, "RabbitMQ connection attempt {Attempt}/{Max} failed, retrying in {Delay}s...",
+                logger.LogWarning("RabbitMQ connection attempt {Attempt}/{Max} failed, retrying in {Delay}s...",
                     attempt, maxRetries, delay);
-                await Task.Delay(TimeSpan.FromSeconds(delay), cancellationToken);
+                try { await Task.Delay(TimeSpan.FromSeconds(delay), retryCts.Token); }
+                catch (OperationCanceledException) { break; }
             }
         }
 
