@@ -61,8 +61,24 @@ public sealed class RabbitMqMessageBus(
             };
         }
 
-        _connection = await factory.CreateConnectionAsync(cancellationToken);
-        logger.LogInformation("RabbitMQ connection established for {ServiceName}", serviceName);
+        // Retry connection with backoff — don't crash the host if RabbitMQ isn't ready yet
+        const int maxRetries = 30;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                _connection = await factory.CreateConnectionAsync(cancellationToken);
+                logger.LogInformation("RabbitMQ connection established for {ServiceName}", serviceName);
+                break;
+            }
+            catch (Exception ex) when (attempt < maxRetries && !cancellationToken.IsCancellationRequested)
+            {
+                var delay = Math.Min(attempt * 2, 30);
+                logger.LogWarning(ex, "RabbitMQ connection attempt {Attempt}/{Max} failed, retrying in {Delay}s...",
+                    attempt, maxRetries, delay);
+                await Task.Delay(TimeSpan.FromSeconds(delay), cancellationToken);
+            }
+        }
 
         // Create publisher channel
         var publishChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
