@@ -47,5 +47,12 @@ public static class MessagingConfigurationExtensions
 
         // Register publisher (resolves from bus)
         services.AddSingleton<IMessagePublisher>(sp => sp.GetRequiredService<IMessageBus>().Publisher);
+
+        // Register stats provider
+        services.AddSingleton<IMessagingStatsProvider>(sp =>
+        {
+            var statsLogger = sp.GetRequiredService<ILogger<RabbitMqStatsProvider>>();
+            return new RabbitMqStatsProvider(settings, statsLogger);
+        });
     }
 }

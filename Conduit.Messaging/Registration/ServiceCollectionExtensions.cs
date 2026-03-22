@@ -71,6 +71,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<IMessageBus>(sp => sp.GetRequiredService<InMemoryMessageBus>());
         services.AddSingleton<IMessagePublisher>(sp => sp.GetRequiredService<IMessageBus>().Publisher);
+        services.AddSingleton<IMessagingStatsProvider, InMemoryStatsProvider>();
     }
 }
 

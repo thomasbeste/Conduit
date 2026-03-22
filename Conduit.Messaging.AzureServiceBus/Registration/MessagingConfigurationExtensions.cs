@@ -47,5 +47,8 @@ public static class MessagingConfigurationExtensions
 
         // Register publisher
         services.AddSingleton<IMessagePublisher>(sp => sp.GetRequiredService<IMessageBus>().Publisher);
+
+        // Register stats provider
+        services.AddSingleton<IMessagingStatsProvider, AzureServiceBusStatsProvider>();
     }
 }
