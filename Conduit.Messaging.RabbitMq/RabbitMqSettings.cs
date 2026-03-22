@@ -8,8 +8,8 @@ public class RabbitMqSettings
     public const string SectionName = "RabbitMQ";
 
     public string Host { get; set; } = "rabbitmq";
-    public int Port { get; set; } = 5671;
-    public bool UseSsl { get; set; } = true;
+    public int Port { get; set; } = 5672;
+    public bool UseSsl { get; set; } = false;
     public string VirtualHost { get; set; } = "gpi";
     public string Username { get; set; } = "gpi";
     public string Password { get; set; } = "PLACEHOLDER";
