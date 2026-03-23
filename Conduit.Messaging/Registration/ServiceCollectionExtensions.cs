@@ -47,6 +47,9 @@ public static class ServiceCollectionExtensions
         // Register hosted service to manage bus lifecycle
         services.AddHostedService<MessageBusHostedService>();
 
+        // Register messaging health check
+        services.AddHealthChecks().AddCheck<MessagingHealthCheck>("messaging", tags: ["ready"]);
+
         return services;
     }
 
@@ -81,22 +84,27 @@ public static class ServiceCollectionExtensions
 /// </summary>
 public sealed class MessageBusHostedService(IMessageBus bus, ILogger<MessageBusHostedService> logger) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken)
-    {
-        // Start connection in background — don't block host startup
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await bus.StartAsync(cancellationToken);
-            }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                logger.LogError(ex, "Message bus failed to start — messaging will be unavailable");
-            }
-        }, cancellationToken);
+    private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(30);
 
-        return Task.CompletedTask;
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(ConnectionTimeout);
+            await bus.StartAsync(timeoutCts.Token);
+            logger.LogInformation("Message bus connected successfully");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "Message bus did not connect within {Timeout}s — messaging may be unavailable until connection is established",
+                ConnectionTimeout.TotalSeconds);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogError(ex, "Message bus failed to start — messaging will be unavailable");
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => bus.StopAsync(cancellationToken);
