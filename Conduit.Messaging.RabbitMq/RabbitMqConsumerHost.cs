@@ -152,11 +152,20 @@ public sealed class RabbitMqConsumerHost(
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_consumerTag != null)
+        try
         {
-            await channel.BasicCancelAsync(_consumerTag, cancellationToken: cancellationToken);
+            if (channel.IsOpen)
+            {
+                if (_consumerTag != null)
+                    await channel.BasicCancelAsync(_consumerTag, cancellationToken: cancellationToken);
+
+                await channel.CloseAsync(cancellationToken);
+            }
         }
-        await channel.CloseAsync(cancellationToken);
-        channel.Dispose();
+        catch (ObjectDisposedException) { }
+        finally
+        {
+            channel.Dispose();
+        }
     }
 }

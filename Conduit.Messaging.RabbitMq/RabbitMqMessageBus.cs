@@ -123,18 +123,28 @@ public sealed class RabbitMqMessageBus(
 
         foreach (var host in _consumerHosts)
         {
-            await host.StopAsync(cancellationToken);
+            try { await host.StopAsync(cancellationToken); }
+            catch (ObjectDisposedException) { }
         }
 
         if (_publisher != null)
         {
-            await _publisher.DisposeAsync();
+            try { await _publisher.DisposeAsync(); }
+            catch (ObjectDisposedException) { }
         }
 
         if (_connection != null)
         {
-            await _connection.CloseAsync(cancellationToken);
-            await _connection.DisposeAsync();
+            try
+            {
+                await _connection.CloseAsync(cancellationToken);
+            }
+            catch (ObjectDisposedException) { }
+            catch (RabbitMQ.Client.Exceptions.AlreadyClosedException) { }
+            finally
+            {
+                await _connection.DisposeAsync();
+            }
         }
 
         _started = false;
