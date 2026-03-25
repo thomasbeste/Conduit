@@ -20,6 +20,7 @@ public sealed class AzureServiceBusMessageBus(
     ILogger<AzureServiceBusMessageBus> logger) : IMessageBus, IAsyncDisposable
 {
     private ServiceBusClient? _client;
+    private ServiceBusAdministrationClient? _adminClient;
     private AzureServiceBusPublisher? _publisher;
     private readonly ConcurrentBag<ServiceBusProcessor> _processors = [];
     private bool _started;
@@ -42,23 +43,23 @@ public sealed class AzureServiceBusMessageBus(
             try
             {
                 _client = new ServiceBusClient(settings.ConnectionString);
+                _adminClient = new ServiceBusAdministrationClient(settings.ConnectionString);
 
                 // Ensure topic exists
-                var adminClient = new ServiceBusAdministrationClient(settings.ConnectionString);
-                if (!await adminClient.TopicExistsAsync(settings.TopicName, cancellationToken))
+                if (!await _adminClient.TopicExistsAsync(settings.TopicName, cancellationToken))
                 {
-                    await adminClient.CreateTopicAsync(settings.TopicName, cancellationToken);
+                    await _adminClient.CreateTopicAsync(settings.TopicName, cancellationToken);
                     logger.LogInformation("Created topic {TopicName}", settings.TopicName);
                 }
 
-                _publisher = new AzureServiceBusPublisher(_client, settings, logger);
+                _publisher = new AzureServiceBusPublisher(_client, settings);
                 logger.LogInformation("Azure Service Bus connection established for {ServiceName}", serviceName);
                 break;
             }
             catch (Exception ex) when (attempt < maxRetries && !cancellationToken.IsCancellationRequested)
             {
                 var delay = Math.Min(attempt * 2, 30);
-                logger.LogWarning("Azure Service Bus connection attempt {Attempt}/{Max} failed, retrying in {Delay}s...",
+                logger.LogWarning(ex, "Azure Service Bus connection attempt {Attempt}/{Max} failed, retrying in {Delay}s...",
                     attempt, maxRetries, delay);
                 try { await Task.Delay(TimeSpan.FromSeconds(delay), cancellationToken); }
                 catch (OperationCanceledException) { return; }
@@ -66,13 +67,12 @@ public sealed class AzureServiceBusMessageBus(
         }
 
         // Set up consumers as topic subscriptions
-        var adminClientForSubs = new ServiceBusAdministrationClient(settings.ConnectionString);
         foreach (var reg in consumerRegistrations)
         {
             var subscriptionName = $"{serviceName}-{reg.MessageType.Name}".ToLowerInvariant();
 
             // Ensure subscription exists with message type filter
-            if (!await adminClientForSubs.SubscriptionExistsAsync(settings.TopicName, subscriptionName, cancellationToken))
+            if (!await _adminClient.SubscriptionExistsAsync(settings.TopicName, subscriptionName, cancellationToken))
             {
                 var subOptions = new CreateSubscriptionOptions(settings.TopicName, subscriptionName)
                 {
@@ -83,7 +83,7 @@ public sealed class AzureServiceBusMessageBus(
                 {
                     Subject = reg.MessageType.Name
                 });
-                await adminClientForSubs.CreateSubscriptionAsync(subOptions, ruleOptions, cancellationToken);
+                await _adminClient.CreateSubscriptionAsync(subOptions, ruleOptions, cancellationToken);
                 logger.LogInformation("Created subscription {Subscription} on {Topic}",
                     subscriptionName, settings.TopicName);
             }

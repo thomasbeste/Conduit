@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
-using Microsoft.Extensions.Logging;
 
 namespace Conduit.Messaging.AzureServiceBus;
 
@@ -9,8 +8,7 @@ namespace Conduit.Messaging.AzureServiceBus;
 /// </summary>
 public sealed class AzureServiceBusPublisher(
     ServiceBusClient client,
-    AzureServiceBusSettings settings,
-    ILogger logger) : IMessagePublisher
+    AzureServiceBusSettings settings) : IMessagePublisher
 {
     public async Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
         where TMessage : class

@@ -19,18 +19,26 @@ public class RabbitMqStatsProvider(
         PropertyNameCaseInsensitive = true
     };
 
+    private HttpClient? _httpClient;
+
+    private HttpClient GetHttpClient()
+    {
+        if (_httpClient is not null) return _httpClient;
+
+        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var auth = Convert.ToBase64String(
+            Encoding.ASCII.GetBytes($"{settings.Username}:{settings.Password}"));
+        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", auth);
+        return _httpClient;
+    }
+
     public async Task<MessagingStats> GetStatsAsync(CancellationToken cancellationToken = default)
     {
         try
         {
             var managementPort = 15672; // RabbitMQ management plugin default
             var encodedVhost = Uri.EscapeDataString(settings.VirtualHost);
-
-            using var httpClient = new HttpClient();
-            var auth = Convert.ToBase64String(
-                Encoding.ASCII.GetBytes($"{settings.Username}:{settings.Password}"));
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", auth);
-            httpClient.Timeout = TimeSpan.FromSeconds(5);
+            var httpClient = GetHttpClient();
 
             var queuesUrl = $"http://{settings.Host}:{managementPort}/api/queues/{encodedVhost}";
             logger.LogDebug("Fetching RabbitMQ queues from {Url}", queuesUrl);
