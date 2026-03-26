@@ -163,6 +163,7 @@ public sealed class RabbitMqConsumerHost(
             }
         }
         catch (ObjectDisposedException) { }
+        catch (RabbitMQ.Client.Exceptions.AlreadyClosedException) { }
         finally
         {
             channel.Dispose();
