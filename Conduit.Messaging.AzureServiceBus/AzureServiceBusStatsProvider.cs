@@ -48,8 +48,7 @@ public class AzureServiceBusStatsProvider(
                     var props = runtime.Value;
                     var activeMessages = props.ActiveMessageCount;
                     var deadLetterMessages = props.DeadLetterMessageCount;
-                    var transferDeadLetterMessages = props.TransferDeadLetterMessageCount;
-                    var totalMessages = activeMessages + deadLetterMessages + transferDeadLetterMessages;
+                    var totalMessages = activeMessages; // Don't include DLQ — reported separately
 
                     queues.Add(new QueueStats
                     {
