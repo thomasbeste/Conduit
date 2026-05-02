@@ -80,31 +80,43 @@ public static class ServiceCollectionExtensions
 
 /// <summary>
 /// Hosted service that starts/stops the message bus with the application.
-/// Connects in the background so the host isn't blocked waiting for RabbitMQ.
+/// Returns immediately so app startup isn't blocked; the bus's own retry loop
+/// handles slow brokers (e.g., k8s sidecar still coming up). Cancellation is
+/// driven by the host application lifetime, not the StartAsync token, so a
+/// late-arriving connection still completes wiring (publisher channel +
+/// consumers) instead of dying mid-handshake on a token that already expired.
 /// </summary>
-public sealed class MessageBusHostedService(IMessageBus bus, ILogger<MessageBusHostedService> logger) : IHostedService
+public sealed class MessageBusHostedService(
+    IMessageBus bus,
+    IHostApplicationLifetime appLifetime,
+    ILogger<MessageBusHostedService> logger) : IHostedService
 {
-    private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(30);
-
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
-        try
+        // Fire-and-forget — the bus has its own retry/timeout budget. Tying
+        // bus startup to `cancellationToken` (the host's "block app startup"
+        // signal) caused: at 30s the token cancelled, the bus's connect kept
+        // retrying with its own CTS, succeeded at ~70s, then CreateChannelAsync
+        // was called with the already-cancelled token → OCE → _publisher null
+        // forever. App-shutdown signalling now goes through ApplicationStopping.
+        _ = Task.Run(async () =>
         {
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(ConnectionTimeout);
-            await bus.StartAsync(timeoutCts.Token);
-            logger.LogInformation("Message bus connected successfully");
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            logger.LogWarning(
-                "Message bus did not connect within {Timeout}s — messaging may be unavailable until connection is established",
-                ConnectionTimeout.TotalSeconds);
-        }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            logger.LogError(ex, "Message bus failed to start — messaging will be unavailable");
-        }
+            try
+            {
+                await bus.StartAsync(appLifetime.ApplicationStopping);
+                logger.LogInformation("Message bus connected successfully");
+            }
+            catch (OperationCanceledException) when (appLifetime.ApplicationStopping.IsCancellationRequested)
+            {
+                // App shutting down before bus came up — expected, no log noise.
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Message bus failed to start — messaging will be unavailable");
+            }
+        }, CancellationToken.None);
+
+        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => bus.StopAsync(cancellationToken);
