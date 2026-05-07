@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
@@ -69,7 +71,7 @@ public sealed class AzureServiceBusMessageBus(
         // Set up consumers as topic subscriptions
         foreach (var reg in consumerRegistrations)
         {
-            var subscriptionName = $"{serviceName}-{reg.MessageType.Name}".ToLowerInvariant();
+            var subscriptionName = BuildSubscriptionName(serviceName, reg.MessageType.Name);
 
             // Ensure subscription exists with message type filter
             if (!await _adminClient.SubscriptionExistsAsync(settings.TopicName, subscriptionName, cancellationToken))
@@ -193,5 +195,27 @@ public sealed class AzureServiceBusMessageBus(
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
+    }
+
+    // Azure Service Bus enforces a 50-character limit on subscription names.
+    // The natural "{service}-{messageType}" form crosses 50 with longer message
+    // type names (e.g. "service-indexing-worker-sharepointchangenotification"
+    // is 52). The SDK rejects creation client-side with ArgumentException, the
+    // bus's StartAsync throws, _started never flips true, and the messaging
+    // health check then forever reports Disconnected.
+    //
+    // Long names get a deterministic short hash suffix: same message type →
+    // same subscription across pods/restarts, no collisions. Short names pass
+    // through unchanged so existing subscriptions aren't orphaned.
+    internal static string BuildSubscriptionName(string serviceName, string messageTypeName)
+    {
+        const int MaxLength = 50;
+        var raw = $"{serviceName}-{messageTypeName}".ToLowerInvariant();
+        if (raw.Length <= MaxLength) return raw;
+
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        var shortHash = Convert.ToHexString(hashBytes)[..8].ToLowerInvariant();
+        var prefixLen = MaxLength - 1 - shortHash.Length; // 50 - 1 - 8 = 41
+        return $"{raw[..prefixLen]}-{shortHash}";
     }
 }
