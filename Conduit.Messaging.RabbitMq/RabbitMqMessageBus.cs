@@ -46,7 +46,13 @@ public sealed class RabbitMqMessageBus(
             VirtualHost = settings.VirtualHost,
             UserName = settings.Username,
             Password = settings.Password,
+            // Self-healing knobs (explicit so a library default flip doesn't
+            // silently change behaviour). With both on, the IConnection
+            // reference survives broker bounces; the publisher + consumer
+            // additionally handle the channel-level shutdown that the
+            // library doesn't replay automatically.
             AutomaticRecoveryEnabled = true,
+            TopologyRecoveryEnabled = true,
             NetworkRecoveryInterval = TimeSpan.FromSeconds(10),
             ClientProvidedName = serviceName
         };
@@ -85,18 +91,17 @@ public sealed class RabbitMqMessageBus(
             }
         }
 
-        // Create publisher channel
-        var publishChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
-        _publisher = new RabbitMqPublisher(publishChannel, logger);
+        // Publisher and consumer hosts share the connection; each owns its
+        // own channel lifecycle (created lazily, recreated on shutdown).
+        // This is the load-bearing change for self-healing — neither holds
+        // a pre-opened channel reference, so a broker bounce doesn't leave
+        // them with permanently-dead handles (incident 2026-05-16).
+        _publisher = new RabbitMqPublisher(_connection, logger);
 
-        // Create consumer hosts
         foreach (var reg in consumerRegistrations)
         {
-            var consumerChannel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken);
-            await consumerChannel.BasicQosAsync(0, settings.PrefetchCount, false, cancellationToken);
-
             var host = new RabbitMqConsumerHost(
-                consumerChannel,
+                _connection,
                 reg,
                 serviceName,
                 settings,
