@@ -54,5 +54,12 @@ public static class MessagingConfigurationExtensions
             var statsLogger = sp.GetRequiredService<ILogger<RabbitMqStatsProvider>>();
             return new RabbitMqStatsProvider(settings, statsLogger);
         });
+
+        // Register admin operations (purge / DLQ redeliver / DLQ purge).
+        services.AddSingleton<IMessagingAdmin>(sp =>
+        {
+            var adminLogger = sp.GetRequiredService<ILogger<RabbitMqMessagingAdmin>>();
+            return new RabbitMqMessagingAdmin(settings, adminLogger);
+        });
     }
 }

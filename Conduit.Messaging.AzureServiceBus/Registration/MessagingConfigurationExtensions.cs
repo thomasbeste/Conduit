@@ -50,5 +50,10 @@ public static class MessagingConfigurationExtensions
 
         // Register stats provider
         services.AddSingleton<IMessagingStatsProvider, AzureServiceBusStatsProvider>();
+
+        // Register admin operations (purge / DLQ redeliver / DLQ purge).
+        // Surfaces in the admin panel so customer ops can stop a stuck
+        // queue without portal access — see #660 silent-zombie incident.
+        services.AddSingleton<IMessagingAdmin, AzureServiceBusMessagingAdmin>();
     }
 }
