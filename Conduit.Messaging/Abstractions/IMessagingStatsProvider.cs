@@ -31,7 +31,15 @@ public class QueueStats
     public long MessagesReady { get; set; }
     public long MessagesUnacknowledged { get; set; }
     public long TotalMessages { get; set; }
-    public int Consumers { get; set; }
+    /// <summary>
+    /// Number of active consumers attached to this queue/subscription.
+    /// Nullable because Azure Service Bus's admin API doesn't expose
+    /// receiver counts per subscription — ASB returns <c>null</c> to
+    /// signal "unknown"; RabbitMQ returns the actual integer. Callers
+    /// that key alerts off this field must treat <c>null</c> as
+    /// "don't evaluate" rather than "zero consumers".
+    /// </summary>
+    public int? Consumers { get; set; }
     public MessageRateStats MessageStats { get; set; } = new();
     public string State { get; set; } = string.Empty;
     public string? IdleSince { get; set; }
