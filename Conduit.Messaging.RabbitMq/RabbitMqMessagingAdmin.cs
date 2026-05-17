@@ -33,17 +33,17 @@ public class RabbitMqMessagingAdmin(
         return await factory.CreateConnectionAsync(ct);
     }
 
-    public async Task<long> PurgeActiveAsync(string name, CancellationToken ct = default)
+    public async Task<DrainResult> PurgeActiveAsync(string name, CancellationToken ct = default)
     {
         await using var connection = await ConnectAsync(ct);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
         var purgedCount = await channel.QueuePurgeAsync(name, ct);
         logger.LogWarning("Purged {Count} active messages from RabbitMQ queue {Name}", purgedCount, name);
-        return purgedCount;
+        return new DrainResult(purgedCount, 0);
     }
 
-    public async Task<long> PurgeDeadLetterAsync(string name, CancellationToken ct = default)
+    public async Task<DrainResult> PurgeDeadLetterAsync(string name, CancellationToken ct = default)
     {
         var dlqName = $"{name}.dlq";
         await using var connection = await ConnectAsync(ct);
@@ -51,12 +51,12 @@ public class RabbitMqMessagingAdmin(
 
         var purgedCount = await channel.QueuePurgeAsync(dlqName, ct);
         logger.LogWarning("Purged {Count} DLQ messages from RabbitMQ queue {Name}", purgedCount, dlqName);
-        return purgedCount;
+        return new DrainResult(purgedCount, 0);
     }
 
-    public async Task<long> RedeliverDeadLetterAsync(string name, int max, CancellationToken ct = default)
+    public async Task<DrainResult> RedeliverDeadLetterAsync(string name, int max, CancellationToken ct = default)
     {
-        if (max <= 0) return 0;
+        if (max <= 0) return new DrainResult(0, 0);
         var dlqName = $"{name}.dlq";
 
         await using var connection = await ConnectAsync(ct);
@@ -87,9 +87,27 @@ public class RabbitMqMessagingAdmin(
             redelivered++;
         }
 
+        // MessageCountAsync is a passive declare — returns current depth
+        // without altering the queue. Lets the UI tell the operator
+        // "redelivered 100, still 47 in DLQ" so they can decide whether
+        // to fire another redeliver round.
+        var remaining = await SafeMessageCountAsync(channel, dlqName);
+
         logger.LogInformation(
-            "Redelivered {Count} DLQ messages to RabbitMQ queue {Name}",
-            redelivered, name);
-        return redelivered;
+            "Redelivered {Count} DLQ messages to RabbitMQ queue {Name} ({Remaining} remaining)",
+            redelivered, name, remaining);
+        return new DrainResult(redelivered, remaining);
+    }
+
+    private static async Task<long> SafeMessageCountAsync(IChannel channel, string queueName)
+    {
+        try
+        {
+            return await channel.MessageCountAsync(queueName);
+        }
+        catch
+        {
+            return 0;
+        }
     }
 }

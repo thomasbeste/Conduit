@@ -21,15 +21,21 @@ public interface IMessagingAdmin
     /// "active count = 0" either way. Subscriptions remain bound to the
     /// topic with the same settings.
     /// </summary>
-    Task<long> PurgeActiveAsync(string name, CancellationToken ct = default);
+    Task<DrainResult> PurgeActiveAsync(string name, CancellationToken ct = default);
 
     /// <summary>
     /// Drop every message in the dead-letter sub-queue of the named
     /// subscription / queue. Used after diagnosing why messages failed —
     /// once the cause is fixed and you've decided the in-flight DLQ
     /// payloads are not worth replaying.
+    ///
+    /// Loops until the DLQ is empty or an internal admin-op timeout
+    /// fires (caller-passed cancellation is honored). Returns a
+    /// <see cref="DrainResult"/> with both how many messages were
+    /// dropped this call and how many remain, so the UI can show "done"
+    /// vs "still N — retry once locks expire" without re-querying.
     /// </summary>
-    Task<long> PurgeDeadLetterAsync(string name, CancellationToken ct = default);
+    Task<DrainResult> PurgeDeadLetterAsync(string name, CancellationToken ct = default);
 
     /// <summary>
     /// Move every message in the dead-letter sub-queue back to the active
@@ -37,5 +43,17 @@ public interface IMessagingAdmin
     /// <paramref name="max"/> messages to avoid replaying a million-row
     /// DLQ in one go.
     /// </summary>
-    Task<long> RedeliverDeadLetterAsync(string name, int max, CancellationToken ct = default);
+    Task<DrainResult> RedeliverDeadLetterAsync(string name, int max, CancellationToken ct = default);
 }
+
+/// <summary>
+/// Result of a drain/redeliver/purge admin operation.
+///
+/// <c>Drained</c> is how many messages this call processed.
+/// <c>Remaining</c> is the authoritative broker-side count after the
+/// call returns — non-zero means the call hit its internal timeout (for
+/// ASB DLQ drains, usually because of locks held from earlier partial
+/// drains that haven't expired). The UI uses this to decide whether to
+/// show "done" or "still N — retry shortly".
+/// </summary>
+public readonly record struct DrainResult(long Drained, long Remaining);
