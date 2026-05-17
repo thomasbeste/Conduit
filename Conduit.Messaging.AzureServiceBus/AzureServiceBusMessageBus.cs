@@ -79,7 +79,18 @@ public sealed class AzureServiceBusMessageBus(
                 var subOptions = new CreateSubscriptionOptions(settings.TopicName, subscriptionName)
                 {
                     MaxDeliveryCount = 3,
-                    DefaultMessageTimeToLive = TimeSpan.FromDays(1)
+                    DefaultMessageTimeToLive = TimeSpan.FromDays(1),
+                    // PT5M is the ASB max. Default is PT1M, which the docparser
+                    // OCR/LibreOffice path routinely overruns — the lock expires
+                    // mid-parse, ASB redelivers, the pod re-parses, infinite loop.
+                    // Observed on rg-gpi-test, 2026-05-16. Existing subscriptions
+                    // are not updated by this code path (SubscriptionExistsAsync
+                    // short-circuits create); operators on installed tenants
+                    // must run `az servicebus topic subscription update
+                    // --lock-duration PT5M ...` or rely on the post-update job
+                    // (#732/#734) to reconcile. AutoLockRenewer in the consumers
+                    // is the proper fix; this raises the ceiling in the meantime.
+                    LockDuration = TimeSpan.FromMinutes(5)
                 };
                 var ruleOptions = new CreateRuleOptions("MessageTypeFilter", new CorrelationRuleFilter
                 {

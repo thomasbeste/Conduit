@@ -56,7 +56,13 @@ public class AzureServiceBusStatsProvider(
                         MessagesReady = activeMessages,
                         MessagesUnacknowledged = 0, // ASB doesn't expose this per-subscription
                         TotalMessages = totalMessages,
-                        Consumers = 0, // ASB doesn't expose consumer count via admin API
+                        // ASB admin API exposes no per-subscription receiver count, so
+                        // we return null ("unknown") rather than zero. Returning zero
+                        // structurally tripped the gateway "No Consumers" alert on every
+                        // sub with a non-zero backlog (rg-gpi-test, 2026-05-17) — null
+                        // lets the alert evaluator skip the rule under ASB and key off
+                        // the real "Backlog Stalled" signal instead.
+                        Consumers = null,
                         MessageStats = new MessageRateStats
                         {
                             // ASB admin API doesn't provide rate metrics — Azure Monitor handles that
