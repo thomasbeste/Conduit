@@ -47,15 +47,15 @@ public sealed class AzureServiceBusMessageBus(
                 _client = new ServiceBusClient(settings.ConnectionString);
                 _adminClient = new ServiceBusAdministrationClient(settings.ConnectionString);
 
-                // Topic must be pre-created by infrastructure (Bicep / Helm).
-                // Verifying here turns "topic missing" into a loud boot failure
-                // rather than a silent publish drop minutes later.
-                if (!await _adminClient.TopicExistsAsync(settings.TopicName, cancellationToken))
-                {
-                    throw new InvalidOperationException(
-                        $"Service Bus topic '{settings.TopicName}' does not exist. " +
-                        "Topics are pre-created by infrastructure — check Bicep / Helm.");
-                }
+                // Topic + subscriptions must be pre-created by infrastructure
+                // (topic via Bicep/Helm, subscriptions via the post-update
+                // runner that consumes per-service manifests). Verifying here
+                // turns "topology missing" into a loud boot failure rather
+                // than a silent publish drop minutes later.
+                await VerifyTopologyAsync(
+                    (name, ct) => TopicExistsAsync(_adminClient!, name, ct),
+                    (topic, sub, ct) => SubscriptionExistsAsync(_adminClient!, topic, sub, ct),
+                    settings.TopicName, serviceName, consumerRegistrations, cancellationToken);
 
                 _publisher = new AzureServiceBusPublisher(_client, settings);
                 logger.LogInformation("Azure Service Bus connection established for {ServiceName}", serviceName);
@@ -71,25 +71,12 @@ public sealed class AzureServiceBusMessageBus(
             }
         }
 
-        // Set up consumers as topic subscriptions. Subscriptions, their MaxDeliveryCount
-        // / TTL / LockDuration / correlation filter are pre-created by the post-update
-        // runner from the per-service manifest baked into its image (publish.sh →
-        // publish/manifests/<service>.json → /app/manifests/). Lazy auto-create was
-        // removed: pods no longer declare topology, so a missing subscription is a
-        // deploy bug and surfaces as a loud boot failure rather than the silent-
-        // zombie drop pattern from the 2026-05-15 incident (pod scaled to 0 →
-        // subscription disappeared → published msgs discarded with no consumer).
+        // VerifyTopologyAsync (called above) already threw if any subscription
+        // is missing — so by this point every subscriptionName is guaranteed
+        // to exist on the broker. We just need to start a processor per one.
         foreach (var reg in consumerRegistrations)
         {
             var subscriptionName = BuildSubscriptionName(serviceName, reg.MessageType.Name);
-
-            if (!await _adminClient.SubscriptionExistsAsync(settings.TopicName, subscriptionName, cancellationToken))
-            {
-                throw new InvalidOperationException(
-                    $"Service Bus subscription '{subscriptionName}' does not exist on topic '{settings.TopicName}'. " +
-                    "Subscriptions are pre-created by the post-update runner from each service's manifest. " +
-                    "Either the manifest is missing this consumer or the runner didn't run for this release.");
-            }
 
             // Start processor
             var processor = _client!.CreateProcessor(settings.TopicName, subscriptionName, new ServiceBusProcessorOptions
@@ -219,4 +206,54 @@ public sealed class AzureServiceBusMessageBus(
         var prefixLen = MaxLength - 1 - shortHash.Length; // 50 - 1 - 8 = 41
         return $"{raw[..prefixLen]}-{shortHash}";
     }
+
+    /// <summary>
+    /// Verifies the broker has every (topic, subscription) the bus is about to
+    /// bind processors to. Pure logic — extracted so tests can exercise the
+    /// failure paths without needing a real ASB or a mock framework. Production
+    /// passes adapters around <see cref="ServiceBusAdministrationClient"/>;
+    /// tests pass lambdas with predetermined boolean answers.
+    /// </summary>
+    internal static async Task VerifyTopologyAsync(
+        Func<string, CancellationToken, Task<bool>> topicExists,
+        Func<string, string, CancellationToken, Task<bool>> subscriptionExists,
+        string topicName,
+        string serviceName,
+        IEnumerable<ConsumerRegistration> consumerRegistrations,
+        CancellationToken ct)
+    {
+        if (!await topicExists(topicName, ct))
+        {
+            throw new InvalidOperationException(
+                $"Service Bus topic '{topicName}' does not exist. " +
+                "Topics are pre-created by infrastructure — check Bicep / Helm.");
+        }
+
+        // Subscriptions, their MaxDeliveryCount / TTL / LockDuration /
+        // correlation filter are pre-created by the post-update runner from
+        // the per-service manifest baked into its image (publish.sh →
+        // publish/manifests/<service>.json → /app/manifests/). Lazy auto-create
+        // was removed: pods no longer declare topology, so a missing
+        // subscription is a deploy bug and surfaces as a loud boot failure
+        // rather than the silent-zombie drop pattern from the 2026-05-15
+        // incident (pod scaled to 0 → subscription disappeared → published
+        // msgs discarded with no consumer).
+        foreach (var reg in consumerRegistrations)
+        {
+            var subscriptionName = BuildSubscriptionName(serviceName, reg.MessageType.Name);
+            if (!await subscriptionExists(topicName, subscriptionName, ct))
+            {
+                throw new InvalidOperationException(
+                    $"Service Bus subscription '{subscriptionName}' does not exist on topic '{topicName}'. " +
+                    "Subscriptions are pre-created by the post-update runner from each service's manifest. " +
+                    "Either the manifest is missing this consumer or the runner didn't run for this release.");
+            }
+        }
+    }
+
+    private static async Task<bool> TopicExistsAsync(ServiceBusAdministrationClient admin, string name, CancellationToken ct)
+        => (await admin.TopicExistsAsync(name, ct)).Value;
+
+    private static async Task<bool> SubscriptionExistsAsync(ServiceBusAdministrationClient admin, string topic, string sub, CancellationToken ct)
+        => (await admin.SubscriptionExistsAsync(topic, sub, ct)).Value;
 }
