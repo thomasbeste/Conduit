@@ -47,11 +47,14 @@ public sealed class AzureServiceBusMessageBus(
                 _client = new ServiceBusClient(settings.ConnectionString);
                 _adminClient = new ServiceBusAdministrationClient(settings.ConnectionString);
 
-                // Ensure topic exists
+                // Topic must be pre-created by infrastructure (Bicep / Helm).
+                // Verifying here turns "topic missing" into a loud boot failure
+                // rather than a silent publish drop minutes later.
                 if (!await _adminClient.TopicExistsAsync(settings.TopicName, cancellationToken))
                 {
-                    await _adminClient.CreateTopicAsync(settings.TopicName, cancellationToken);
-                    logger.LogInformation("Created topic {TopicName}", settings.TopicName);
+                    throw new InvalidOperationException(
+                        $"Service Bus topic '{settings.TopicName}' does not exist. " +
+                        "Topics are pre-created by infrastructure — check Bicep / Helm.");
                 }
 
                 _publisher = new AzureServiceBusPublisher(_client, settings);
@@ -68,37 +71,24 @@ public sealed class AzureServiceBusMessageBus(
             }
         }
 
-        // Set up consumers as topic subscriptions
+        // Set up consumers as topic subscriptions. Subscriptions, their MaxDeliveryCount
+        // / TTL / LockDuration / correlation filter are pre-created by the post-update
+        // runner from the per-service manifest baked into its image (publish.sh →
+        // publish/manifests/<service>.json → /app/manifests/). Lazy auto-create was
+        // removed: pods no longer declare topology, so a missing subscription is a
+        // deploy bug and surfaces as a loud boot failure rather than the silent-
+        // zombie drop pattern from the 2026-05-15 incident (pod scaled to 0 →
+        // subscription disappeared → published msgs discarded with no consumer).
         foreach (var reg in consumerRegistrations)
         {
             var subscriptionName = BuildSubscriptionName(serviceName, reg.MessageType.Name);
 
-            // Ensure subscription exists with message type filter
             if (!await _adminClient.SubscriptionExistsAsync(settings.TopicName, subscriptionName, cancellationToken))
             {
-                var subOptions = new CreateSubscriptionOptions(settings.TopicName, subscriptionName)
-                {
-                    MaxDeliveryCount = 3,
-                    DefaultMessageTimeToLive = TimeSpan.FromDays(1),
-                    // PT5M is the ASB max. Default is PT1M, which the docparser
-                    // OCR/LibreOffice path routinely overruns — the lock expires
-                    // mid-parse, ASB redelivers, the pod re-parses, infinite loop.
-                    // Observed on rg-gpi-test, 2026-05-16. Existing subscriptions
-                    // are not updated by this code path (SubscriptionExistsAsync
-                    // short-circuits create); operators on installed tenants
-                    // must run `az servicebus topic subscription update
-                    // --lock-duration PT5M ...` or rely on the post-update job
-                    // (#732/#734) to reconcile. AutoLockRenewer in the consumers
-                    // is the proper fix; this raises the ceiling in the meantime.
-                    LockDuration = TimeSpan.FromMinutes(5)
-                };
-                var ruleOptions = new CreateRuleOptions("MessageTypeFilter", new CorrelationRuleFilter
-                {
-                    Subject = reg.MessageType.Name
-                });
-                await _adminClient.CreateSubscriptionAsync(subOptions, ruleOptions, cancellationToken);
-                logger.LogInformation("Created subscription {Subscription} on {Topic}",
-                    subscriptionName, settings.TopicName);
+                throw new InvalidOperationException(
+                    $"Service Bus subscription '{subscriptionName}' does not exist on topic '{settings.TopicName}'. " +
+                    "Subscriptions are pre-created by the post-update runner from each service's manifest. " +
+                    "Either the manifest is missing this consumer or the runner didn't run for this release.");
             }
 
             // Start processor
@@ -218,7 +208,7 @@ public sealed class AzureServiceBusMessageBus(
     // Long names get a deterministic short hash suffix: same message type →
     // same subscription across pods/restarts, no collisions. Short names pass
     // through unchanged so existing subscriptions aren't orphaned.
-    internal static string BuildSubscriptionName(string serviceName, string messageTypeName)
+    public static string BuildSubscriptionName(string serviceName, string messageTypeName)
     {
         const int MaxLength = 50;
         var raw = $"{serviceName}-{messageTypeName}".ToLowerInvariant();
