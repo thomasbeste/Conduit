@@ -21,6 +21,12 @@ public static class ServiceCollectionExtensions
         var config = new MessagingConfiguration();
         configure(config);
 
+        // Expose the populated config (ServiceName + ConsumerRegistrations) via DI
+        // so tooling — e.g. the per-service `--emit-subscription-manifest` mode
+        // each Program.cs uses to publish its ASB subscription list — can read
+        // the registration set without re-running the configure callback.
+        services.AddSingleton(config);
+
         if (config.TransportRegistrar is not null)
         {
             config.TransportRegistrar(services, config);
