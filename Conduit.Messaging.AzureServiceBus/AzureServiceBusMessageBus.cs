@@ -57,7 +57,17 @@ public sealed class AzureServiceBusMessageBus(
                     (topic, sub, ct) => SubscriptionExistsAsync(_adminClient!, topic, sub, ct),
                     settings.TopicName, serviceName, consumerRegistrations, cancellationToken);
 
-                _publisher = new AzureServiceBusPublisher(_client, settings);
+                // Build the publish-side guard from the live topology. The
+                // guard refuses to publish a Subject that has no matching
+                // subscription correlation filter — without it, the broker
+                // silently discards mis-routed messages. See PublisherSubjectGuard.
+                var publisherGuard = await DiscoverPublisherGuardAsync(
+                    _adminClient!, settings.TopicName, cancellationToken);
+                logger.LogInformation(
+                    "Publish-side topology discovered for {Topic}: {SubjectCount} subject(s) routable, hasWildcard={HasWildcard}",
+                    settings.TopicName, publisherGuard.KnownSubjects.Count, publisherGuard.HasWildcardSubscription);
+
+                _publisher = new AzureServiceBusPublisher(_client, settings, publisherGuard);
                 logger.LogInformation("Azure Service Bus connection established for {ServiceName}", serviceName);
                 break;
             }
@@ -256,4 +266,74 @@ public sealed class AzureServiceBusMessageBus(
 
     private static async Task<bool> SubscriptionExistsAsync(ServiceBusAdministrationClient admin, string topic, string sub, CancellationToken ct)
         => (await admin.SubscriptionExistsAsync(topic, sub, ct)).Value;
+
+    /// <summary>
+    /// Pure-logic helper: given a list of (subscription, rule) summaries,
+    /// produces the <see cref="PublisherSubjectGuard"/> the publisher uses
+    /// to refuse silent-drop publishes. A wildcard / SQL filter on any
+    /// subscription makes the guard permissive — we only block when we
+    /// can prove no subscriber would catch the subject. Extracted so
+    /// tests drive it with canned topology, no real admin client needed.
+    /// </summary>
+    internal static PublisherSubjectGuard BuildPublisherGuard(
+        string topicName,
+        IEnumerable<SubscriptionRuleSummary> rules)
+    {
+        var subjects = new HashSet<string>(StringComparer.Ordinal);
+        var hasWildcard = false;
+
+        foreach (var r in rules)
+        {
+            switch (r.Kind)
+            {
+                case RuleFilterKind.Correlation when !string.IsNullOrEmpty(r.CorrelationSubject):
+                    subjects.Add(r.CorrelationSubject);
+                    break;
+                case RuleFilterKind.True:
+                case RuleFilterKind.Sql:
+                    // SQL filters can route by arbitrary expressions
+                    // (e.g. user.role = 'admin') — we cannot statically
+                    // decide whether a given Subject will or won't match,
+                    // so we have to assume it might.
+                    hasWildcard = true;
+                    break;
+            }
+        }
+
+        return new PublisherSubjectGuard(subjects, hasWildcard, topicName);
+    }
+
+    /// <summary>
+    /// Production adapter: enumerates every subscription on the topic +
+    /// every rule on each subscription, classifies each rule, and hands
+    /// the list to <see cref="BuildPublisherGuard"/>. Called once at bus
+    /// startup.
+    /// </summary>
+    private static async Task<PublisherSubjectGuard> DiscoverPublisherGuardAsync(
+        ServiceBusAdministrationClient admin,
+        string topicName,
+        CancellationToken ct)
+    {
+        var rules = new List<SubscriptionRuleSummary>();
+        await foreach (var sub in admin.GetSubscriptionsAsync(topicName, ct))
+        {
+            await foreach (var rule in admin.GetRulesAsync(topicName, sub.SubscriptionName, ct))
+            {
+                rules.Add(rule.Filter switch
+                {
+                    CorrelationRuleFilter c => new SubscriptionRuleSummary(
+                        sub.SubscriptionName, RuleFilterKind.Correlation, c.Subject),
+                    TrueRuleFilter => new SubscriptionRuleSummary(
+                        sub.SubscriptionName, RuleFilterKind.True, null),
+                    FalseRuleFilter => new SubscriptionRuleSummary(
+                        sub.SubscriptionName, RuleFilterKind.False, null),
+                    SqlRuleFilter => new SubscriptionRuleSummary(
+                        sub.SubscriptionName, RuleFilterKind.Sql, null),
+                    _ => new SubscriptionRuleSummary(
+                        sub.SubscriptionName, RuleFilterKind.Sql, null),  // unknown → treat as opaque
+                });
+            }
+        }
+        return BuildPublisherGuard(topicName, rules);
+    }
 }

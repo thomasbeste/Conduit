@@ -5,10 +5,20 @@ namespace Conduit.Messaging.AzureServiceBus;
 
 /// <summary>
 /// Publishes messages to Azure Service Bus topics and queues.
+///
+/// Topic publishes are pre-flight checked against a
+/// <see cref="PublisherSubjectGuard"/> loaded at bus startup. If no
+/// subscription on the target topic has a correlation filter for the
+/// message's Subject (and no wildcard subscription would catch it),
+/// the publish throws rather than letting the broker silently discard
+/// the message. Queue sends bypass the guard — queues accumulate
+/// messages rather than silent-dropping them, so the failure mode is
+/// observable through queue depth metrics.
 /// </summary>
 public sealed class AzureServiceBusPublisher(
     ServiceBusClient client,
-    AzureServiceBusSettings settings) : IMessagePublisher
+    AzureServiceBusSettings settings,
+    PublisherSubjectGuard subjectGuard) : IMessagePublisher
 {
     public async Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
         where TMessage : class
@@ -31,6 +41,15 @@ public sealed class AzureServiceBusPublisher(
     public async Task PublishAsync<TMessage>(TMessage message, string topic, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken = default)
         where TMessage : class
     {
+        // Fail loud before opening a sender: if no subscription will
+        // catch this Subject the broker would silently discard the
+        // message and the publisher would have no way to know. The
+        // guard is built at bus startup from live topology and is only
+        // valid for the topic it was built against; off-topic publishes
+        // (rare) skip the check.
+        if (string.Equals(topic, subjectGuard.TopicName, StringComparison.Ordinal))
+            subjectGuard.EnsureCanPublish(typeof(TMessage).Name);
+
         await using var sender = client.CreateSender(topic);
         var sbMessage = CreateMessage(message, contextHeaders);
         await sender.SendMessageAsync(sbMessage, cancellationToken);
