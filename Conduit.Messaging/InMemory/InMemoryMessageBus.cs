@@ -87,7 +87,8 @@ public sealed class InMemoryMessageBus : IMessageBus
             var consumerPipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
             if (consumerPipelineContext is not null)
             {
-                PipelineContextBridge.HydrateContext(consumerPipelineContext, context);
+                var signingKey = scope.ServiceProvider.GetService<IMessagingSigningKey>();
+                PipelineContextBridge.HydrateContext(consumerPipelineContext, context, signingKey);
 
                 // Set ambient context so consumers can access it via PipelineContext.Current
                 if (consumerPipelineContext is PipelineContext concrete)

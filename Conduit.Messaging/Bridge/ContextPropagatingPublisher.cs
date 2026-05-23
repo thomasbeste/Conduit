@@ -10,7 +10,7 @@ namespace Conduit.Messaging.Bridge;
 /// Uses lazy publisher resolution from IMessageBus to avoid accessing bus.Publisher
 /// before the hosted service has called StartAsync.
 /// </summary>
-public sealed class ContextPropagatingPublisher(IMessageBus bus) : IMessagePublisher
+public sealed class ContextPropagatingPublisher(IMessageBus bus, IMessagingSigningKey? signingKey = null) : IMessagePublisher
 {
     private IMessagePublisher Inner => bus.Publisher;
 
@@ -38,15 +38,15 @@ public sealed class ContextPropagatingPublisher(IMessageBus bus) : IMessagePubli
         where TMessage : class
         => Inner.SendAsync(message, queueName, MergeHeaders(contextHeaders), cancellationToken);
 
-    private static Dictionary<string, string> ExtractHeaders()
+    private Dictionary<string, string> ExtractHeaders()
     {
         var context = PipelineContext.Current;
         return context is not null
-            ? PipelineContextBridge.ExtractHeaders(context)
+            ? PipelineContextBridge.ExtractHeaders(context, signingKey)
             : new Dictionary<string, string>();
     }
 
-    private static Dictionary<string, string> MergeHeaders(IReadOnlyDictionary<string, string>? explicitHeaders)
+    private Dictionary<string, string> MergeHeaders(IReadOnlyDictionary<string, string>? explicitHeaders)
     {
         var headers = ExtractHeaders();
 

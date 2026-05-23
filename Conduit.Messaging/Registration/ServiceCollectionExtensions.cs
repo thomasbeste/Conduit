@@ -46,7 +46,9 @@ public static class ServiceCollectionExtensions
             {
                 services.Remove(existing);
                 services.AddSingleton<IMessagePublisher>(sp =>
-                    new ContextPropagatingPublisher(sp.GetRequiredService<IMessageBus>()));
+                    new ContextPropagatingPublisher(
+                        sp.GetRequiredService<IMessageBus>(),
+                        sp.GetService<IMessagingSigningKey>()));
             }
         }
 

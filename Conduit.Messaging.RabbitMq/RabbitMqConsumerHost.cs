@@ -222,7 +222,8 @@ public sealed class RabbitMqConsumerHost(
             var pipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
             if (pipelineContext is not null)
             {
-                PipelineContextBridge.HydrateContext(pipelineContext, context);
+                var signingKey = scope.ServiceProvider.GetService<IMessagingSigningKey>();
+                PipelineContextBridge.HydrateContext(pipelineContext, context, signingKey);
 
                 // Set ambient context so consumers can access it via PipelineContext.Current
                 if (pipelineContext is PipelineContext concrete)
