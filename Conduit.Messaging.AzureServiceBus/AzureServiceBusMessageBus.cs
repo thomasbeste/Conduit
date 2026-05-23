@@ -1,9 +1,12 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
+using Conduit.Mediator;
+using Conduit.Messaging.Bridge;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -21,6 +24,24 @@ public sealed class AzureServiceBusMessageBus(
     IServiceProvider serviceProvider,
     ILogger<AzureServiceBusMessageBus> logger) : IMessageBus, IAsyncDisposable
 {
+    // Single Meter for the ASB transport. Counter increments once per
+    // DLQ'd message so operators can alert on identity-signature
+    // mismatches without grepping logs. Tag set keeps cardinality bounded
+    // (subscription only — never the message ID or any baggage value).
+    internal static readonly Meter Meter = new("Conduit.Messaging.AzureServiceBus");
+
+    private static readonly Counter<long> IdentitySignatureMismatchCounter =
+        Meter.CreateCounter<long>(
+            "messaging.asb.identity_signature_mismatch",
+            unit: "{message}",
+            description: "Messages dead-lettered because their identity-baggage HMAC did not verify.");
+
+    private static readonly Counter<long> HydrationErrorCounter =
+        Meter.CreateCounter<long>(
+            "messaging.asb.hydration_error",
+            unit: "{message}",
+            description: "Messages dead-lettered because pipeline-context hydration failed for a non-signature reason.");
+
     private ServiceBusClient? _client;
     private ServiceBusAdministrationClient? _adminClient;
     private AzureServiceBusPublisher? _publisher;
@@ -99,42 +120,21 @@ public sealed class AzureServiceBusMessageBus(
             var messageType = reg.MessageType;
             var dispatcher = reg.GetDispatcher();
 
-            processor.ProcessMessageAsync += async args =>
-            {
-                try
-                {
-                    using var scope = serviceProvider.CreateScope();
-                    var consumer = scope.ServiceProvider.GetRequiredService(consumerType);
-
-                    var message = JsonSerializer.Deserialize(args.Message.Body.ToString(), messageType);
-                    if (message == null) return;
-
-                    // Extract context headers
-                    var headers = new Dictionary<string, string>();
-                    foreach (var prop in args.Message.ApplicationProperties)
-                    {
-                        if (prop.Key.StartsWith("ctx-") && prop.Value is string val)
-                        {
-                            headers[prop.Key[4..]] = val;
-                        }
-                    }
-
-                    var context = new MessageContext
-                    {
-                        MessageId = Guid.TryParse(args.Message.MessageId, out var mid) ? mid : Guid.NewGuid(),
-                        Headers = headers,
-                        DeliveryCount = args.Message.DeliveryCount
-                    };
-                    await dispatcher.DispatchAsync(consumer, message, context, args.CancellationToken);
-
-                    await args.CompleteMessageAsync(args.Message, args.CancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Error processing message {MessageId}", args.Message.MessageId);
-                    await args.AbandonMessageAsync(args.Message, cancellationToken: args.CancellationToken);
-                }
-            };
+            var capturedSubscription = subscriptionName;
+            processor.ProcessMessageAsync += args => ProcessMessageAsync(
+                input: new IncomingAsbMessage(
+                    Body: args.Message.Body.ToString(),
+                    MessageId: args.Message.MessageId,
+                    DeliveryCount: args.Message.DeliveryCount,
+                    ApplicationProperties: args.Message.ApplicationProperties),
+                consumerType: consumerType,
+                messageType: messageType,
+                dispatcher: dispatcher,
+                subscriptionName: capturedSubscription,
+                complete: ct => args.CompleteMessageAsync(args.Message, ct),
+                deadLetter: (reason, description, ct) => args.DeadLetterMessageAsync(args.Message, reason, description, ct),
+                abandon: ct => args.AbandonMessageAsync(args.Message, cancellationToken: ct),
+                cancellationToken: args.CancellationToken);
 
             processor.ProcessErrorAsync += args =>
             {
@@ -260,6 +260,123 @@ public sealed class AzureServiceBusMessageBus(
             }
         }
     }
+
+    /// <summary>
+    /// Per-message processing core — extracted from the processor lambda so
+    /// tests can drive every path (happy, signature-mismatch, hydration error,
+    /// dispatch error) with lambdas standing in for the ASB SDK's
+    /// complete/dead-letter/abandon callbacks. The production wiring in
+    /// <see cref="StartAsync"/> just adapts a real <c>ProcessMessageEventArgs</c>
+    /// into this signature.
+    /// </summary>
+    internal async Task ProcessMessageAsync(
+        IncomingAsbMessage input,
+        Type consumerType,
+        Type messageType,
+        ConsumerDispatcher dispatcher,
+        string subscriptionName,
+        Func<CancellationToken, Task> complete,
+        Func<string, string, CancellationToken, Task> deadLetter,
+        Func<CancellationToken, Task> abandon,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = serviceProvider.CreateAsyncScope();
+            var consumer = scope.ServiceProvider.GetRequiredService(consumerType);
+
+            var message = JsonSerializer.Deserialize(input.Body, messageType);
+            if (message == null) return;
+
+            var headers = new Dictionary<string, string>();
+            foreach (var (key, value) in input.ApplicationProperties)
+            {
+                if (key.StartsWith("ctx-") && value is string val)
+                {
+                    headers[key[4..]] = val;
+                }
+            }
+
+            var context = new MessageContext
+            {
+                MessageId = Guid.TryParse(input.MessageId, out var mid) ? mid : Guid.NewGuid(),
+                Headers = headers,
+                DeliveryCount = input.DeliveryCount,
+                SourceAddress = settings.TopicName,
+                DestinationAddress = subscriptionName
+            };
+
+            // Hydrate pipeline context with cross-process state (baggage,
+            // causality, signed identity). Mirrors RabbitMqConsumerHost so
+            // GpiContext.UserId/TenantId/Role/GroupIds/SessionId arrive
+            // populated for repository ACL filters on ACA (#893).
+            var pipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
+            if (pipelineContext is not null)
+            {
+                var signingKey = scope.ServiceProvider.GetService<IMessagingSigningKey>();
+                try
+                {
+                    PipelineContextBridge.HydrateContext(pipelineContext, context, signingKey);
+                }
+                catch (IdentitySignatureMismatchException ex)
+                {
+                    // Fail loud + DLQ. Never dispatch with empty/forged identity.
+                    // Log the WHY but never the expected/actual signature bytes.
+                    IdentitySignatureMismatchCounter.Add(
+                        1,
+                        new KeyValuePair<string, object?>("subscription", subscriptionName),
+                        new KeyValuePair<string, object?>("topic", settings.TopicName));
+                    logger.LogError(
+                        "Dead-lettering ASB message {MessageId} on {Subscription}: identity-signature-invalid ({Reason})",
+                        input.MessageId, subscriptionName, ex.Message);
+                    await deadLetter("IdentitySignatureMismatch", "identity-signature-invalid", cancellationToken);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // Any other hydration failure (configuration error,
+                    // malformed baggage, etc.) is a deploy bug — DLQ so it
+                    // surfaces loudly instead of dispatching with a
+                    // half-populated principal.
+                    HydrationErrorCounter.Add(
+                        1,
+                        new KeyValuePair<string, object?>("subscription", subscriptionName),
+                        new KeyValuePair<string, object?>("topic", settings.TopicName));
+                    logger.LogError(
+                        ex,
+                        "Dead-lettering ASB message {MessageId} on {Subscription}: pipeline-context hydration failed",
+                        input.MessageId, subscriptionName);
+                    await deadLetter("ContextHydrationFailed", ex.GetType().Name, cancellationToken);
+                    return;
+                }
+
+                if (pipelineContext is PipelineContext concrete)
+                    PipelineContext.SetCurrent(concrete);
+            }
+
+            await dispatcher.DispatchAsync(consumer, message, context, cancellationToken);
+
+            await complete(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error processing message {MessageId}", input.MessageId);
+            await abandon(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Test-friendly projection of <see cref="Azure.Messaging.ServiceBus.ServiceBusReceivedMessage"/>:
+    /// only the fields <see cref="ProcessMessageAsync"/> actually reads. The
+    /// SDK type has an internal constructor so cannot be instantiated outside
+    /// the SDK — this record lets tests build canned inputs without faking
+    /// the whole SDK.
+    /// </summary>
+    internal sealed record IncomingAsbMessage(
+        string Body,
+        string MessageId,
+        int DeliveryCount,
+        IReadOnlyDictionary<string, object> ApplicationProperties);
 
     private static async Task<bool> TopicExistsAsync(ServiceBusAdministrationClient admin, string name, CancellationToken ct)
         => (await admin.TopicExistsAsync(name, ct)).Value;
