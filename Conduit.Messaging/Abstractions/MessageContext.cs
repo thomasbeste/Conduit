@@ -45,13 +45,9 @@ public sealed class MessageContext
     /// </summary>
     public int DeliveryCount { get; init; }
 
-    /// <summary>
-    /// The tenant ID if multi-tenant system.
-    /// </summary>
-    public string? TenantId { get; init; }
-
-    /// <summary>
-    /// The user ID who initiated the message.
-    /// </summary>
-    public string? UserId { get; init; }
+    // TenantId / UserId removed: superseded by IPipelineContext baggage
+    // (signed via PipelineContextBridge, see Conduit.Messaging.Bridge).
+    // Identity now flows as `Guid` through PipelineContext.Current, hydrated
+    // from `ctx-baggage.*` ApplicationProperties on consume. Consumers should
+    // read identity from PipelineContext.Current, never from MessageContext.
 }
