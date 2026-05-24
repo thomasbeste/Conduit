@@ -297,6 +297,16 @@ public sealed class AzureServiceBusMessageBus(
                 }
             }
 
+            // Lifecycle log: message received. DEBUG so the happy path doesn't
+            // burn log budget; the abandon/dead-letter path below logs at WARN+
+            // so anything anomalous still surfaces. Operator chasing a stalled
+            // consumer turns DEBUG on for the relevant pod and sees every
+            // message admit. (#1056)
+            logger.LogDebug(
+                "asb_message_received: type={MessageType}, id={MessageId}, sub={Subscription}, deliveryCount={DeliveryCount}, correlationId={CorrelationId}",
+                messageType.Name, input.MessageId, subscriptionName, input.DeliveryCount,
+                headers.GetValueOrDefault("conduit.correlation-id"));
+
             var context = new MessageContext
             {
                 MessageId = Guid.TryParse(input.MessageId, out var mid) ? mid : Guid.NewGuid(),
@@ -357,10 +367,32 @@ public sealed class AzureServiceBusMessageBus(
             await dispatcher.DispatchAsync(consumer, message, context, cancellationToken);
 
             await complete(cancellationToken);
+
+            // Completion log: INFO when DeliveryCount > 1 (retry succeeded —
+            // worth knowing the system is healing itself), DEBUG otherwise so
+            // happy-path noise stays bounded. (#1056)
+            if (input.DeliveryCount > 1)
+            {
+                logger.LogInformation(
+                    "asb_message_completed_after_retry: type={MessageType}, id={MessageId}, sub={Subscription}, deliveryCount={DeliveryCount}",
+                    messageType.Name, input.MessageId, subscriptionName, input.DeliveryCount);
+            }
+            else
+            {
+                logger.LogDebug(
+                    "asb_message_completed: type={MessageType}, id={MessageId}, sub={Subscription}",
+                    messageType.Name, input.MessageId, subscriptionName);
+            }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error processing message {MessageId}", input.MessageId);
+            // Abandon log includes DeliveryCount so a retry storm or a message
+            // hovering near MaxDeliveryCount (about to dead-letter) is visible
+            // before ASB itself moves it to the DLQ. (#1056)
+            logger.LogWarning(
+                ex,
+                "asb_message_abandoned: type={MessageType}, id={MessageId}, sub={Subscription}, deliveryCount={DeliveryCount} — abandoning for retry",
+                messageType.Name, input.MessageId, subscriptionName, input.DeliveryCount);
             await abandon(cancellationToken);
         }
     }
