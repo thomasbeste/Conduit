@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Text;
 using Conduit.Mediator;
 using Conduit.Messaging.Bridge;
@@ -35,6 +36,25 @@ public sealed class RabbitMqConsumerHost(
     ILogger logger,
     Func<Action<object, Type>?>? getOnMessageConsumed = null)
 {
+    // Single Meter for the RMQ transport. Mirrors the ASB host: one counter
+    // for signed-baggage mismatches (Attacker D — broker access on k3s/k3d),
+    // one for any other hydration failure (deploy bug — malformed baggage,
+    // config error). Tag set kept low-cardinality (exchange + service only —
+    // never message id or baggage value).
+    internal static readonly Meter Meter = new("Conduit.Messaging.RabbitMq");
+
+    private static readonly Counter<long> IdentitySignatureMismatchCounter =
+        Meter.CreateCounter<long>(
+            "messaging.rmq.identity_signature_mismatch",
+            unit: "{message}",
+            description: "Messages dead-lettered because their identity-baggage HMAC did not verify.");
+
+    private static readonly Counter<long> HydrationErrorCounter =
+        Meter.CreateCounter<long>(
+            "messaging.rmq.hydration_error",
+            unit: "{message}",
+            description: "Messages dead-lettered because pipeline-context hydration failed for a non-signature reason.");
+
     private readonly Func<Action<object, Type>?> _getOnMessageConsumed = getOnMessageConsumed ?? (() => null);
     private IChannel? _channel;
     private string? _consumerTag;
@@ -223,7 +243,58 @@ public sealed class RabbitMqConsumerHost(
             if (pipelineContext is not null)
             {
                 var signingKey = scope.ServiceProvider.GetService<IMessagingSigningKey>();
-                PipelineContextBridge.HydrateContext(pipelineContext, context, signingKey);
+                try
+                {
+                    PipelineContextBridge.HydrateContext(pipelineContext, context, signingKey);
+                }
+                catch (IdentitySignatureMismatchException ex)
+                {
+                    // Fail loud + DLQ immediately. The queue is bound to a
+                    // dead-letter exchange (see OpenAndBindAsync), so a Nack
+                    // with requeue=false routes the message straight to the
+                    // DLQ without spending RetryCount cycles requeuing it.
+                    // Mirrors AzureServiceBusMessageBus.cs (PR #918) for the
+                    // ASB leg of the same fix (issue #970).
+                    IdentitySignatureMismatchCounter.Add(
+                        1,
+                        new KeyValuePair<string, object?>("exchange", ea.Exchange),
+                        new KeyValuePair<string, object?>("service", serviceName));
+                    logger.LogError(
+                        "Dead-lettering RMQ message {MessageId} from {Exchange}: identity-signature-invalid ({Reason})",
+                        ea.BasicProperties.MessageId, ea.Exchange, ex.Message);
+                    try
+                    {
+                        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
+                    }
+                    catch (AlreadyClosedException)
+                    {
+                        // Channel died mid-nack; the broker will redeliver on
+                        // reconnect and we'll re-hit this same branch then.
+                    }
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // Any other hydration failure (malformed baggage, config
+                    // error) is a deploy bug — DLQ so it surfaces loudly
+                    // instead of dispatching with a half-populated principal.
+                    HydrationErrorCounter.Add(
+                        1,
+                        new KeyValuePair<string, object?>("exchange", ea.Exchange),
+                        new KeyValuePair<string, object?>("service", serviceName));
+                    logger.LogError(
+                        ex,
+                        "Dead-lettering RMQ message {MessageId} from {Exchange}: pipeline-context hydration failed",
+                        ea.BasicProperties.MessageId, ea.Exchange);
+                    try
+                    {
+                        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
+                    }
+                    catch (AlreadyClosedException)
+                    {
+                    }
+                    return;
+                }
 
                 // Set ambient context so consumers can access it via PipelineContext.Current
                 if (pipelineContext is PipelineContext concrete)
