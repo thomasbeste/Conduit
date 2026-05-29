@@ -6,6 +6,13 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
 
+    <!-- Opt out of Central Package Management. Conduit pins package versions
+         inline so it stays self-contained as a standalone NuGet library; this
+         also prevents a consuming repo's Directory.Packages.props (discovered up
+         the directory tree when Conduit is vendored as a submodule) from
+         capturing these projects and breaking the build with NU1008. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+
     <!-- NuGet shared metadata -->
     <Authors>Thomas Albrecht-Beste</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
