@@ -1,0 +1,12 @@
+<Project>
+  <!-- Opt out of Central Package Management. Conduit pins package versions
+       inline to stay a self-contained NuGet library. Because MSBuild resolves
+       Directory.Packages.props by walking UP the directory tree, this file also
+       stops a consuming repo's Directory.Packages.props (when Conduit is vendored
+       as a git submodule) from capturing these projects and breaking the build
+       with NU1008. It must be a Directory.Packages.props (not just a property in
+       Directory.Build.props), since the SDK imports the former AFTER the latter. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>
