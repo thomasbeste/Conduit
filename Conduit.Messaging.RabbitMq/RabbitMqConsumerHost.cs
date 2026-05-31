@@ -101,6 +101,20 @@ public sealed class RabbitMqConsumerHost(
 
         var queueArgs = new Dictionary<string, object?>
         {
+            // Consumer queues MUST be quorum. Only quorum queues stamp the
+            // x-delivery-count header that GetDeliveryCount reads to enforce
+            // RetryCount — classic queues never set it, so the retry counter
+            // capped at 1, `deliveryCount < RetryCount` stayed true forever,
+            // and a single deterministic consumer failure (e.g. an orphaned
+            // command hitting an FK violation) requeued infinitely, wedging
+            // the broker and starving every other message. The DLQ existed
+            // but the retry-exhaustion path could never reach it.
+            // x-delivery-limit is the broker-native backstop: quorum
+            // auto-dead-letters once delivery count exceeds it, independent
+            // of the app-side nack logic. Set just above RetryCount so the
+            // app-side requeue:false (cleaner, logged) fires first.
+            ["x-queue-type"] = "quorum",
+            ["x-delivery-limit"] = settings.RetryCount + 1,
             ["x-dead-letter-exchange"] = dlxExchange,
             ["x-dead-letter-routing-key"] = dlqQueue
         };
@@ -344,9 +358,20 @@ public sealed class RabbitMqConsumerHost(
 
     private static int GetDeliveryCount(BasicDeliverEventArgs ea)
     {
+        // Quorum queues stamp x-delivery-count on every redelivery. It arrives
+        // as an AMQP long, so match both long and int — reading it as int-only
+        // would silently fall through to 0 and re-break the retry cap. Classic
+        // queues never set the header; the Redelivered fallback only tells
+        // first-vs-not (caps retries at 1) which is why consumer queues are
+        // declared quorum (see OpenAndBindAsync).
         if (ea.BasicProperties.Headers?.TryGetValue("x-delivery-count", out var count) == true)
         {
-            return count is int i ? i : 0;
+            return count switch
+            {
+                long l => (int)l,
+                int i => i,
+                _ => 0
+            };
         }
         return ea.Redelivered ? 1 : 0;
     }
