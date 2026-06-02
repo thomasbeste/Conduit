@@ -148,6 +148,13 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
 
             var consumer = new AsyncEventingBasicConsumer(channel);
             consumer.ReceivedAsync += OnMessageReceivedAsync;
+            // Broker-initiated cancel (queue deleted/recreated, quorum leader
+            // change, ...) can land with the CHANNEL still open, so the IsOpen
+            // probe alone would keep reporting healthy while we're no longer
+            // consuming — a silent zombie. UnregisteredAsync is v7's signal for
+            // that; clearing the tag flips IsHealthy false so the supervisor
+            // rebuilds. (See OnConsumerUnregisteredAsync for the tag guard.)
+            consumer.UnregisteredAsync += OnConsumerUnregisteredAsync;
             var consumerTag = await channel.BasicConsumeAsync(_queueName, autoAck: false, consumer: consumer, cancellationToken: cancellationToken);
 
             _channel = channel;
@@ -161,6 +168,32 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
         {
             _rebuildLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Broker unregistered our consumer (server-sent basic.cancel: queue deleted
+    /// or recreated, quorum leader change, etc.). This can fire with the channel
+    /// still open, so <see cref="IsHealthy"/>'s IsOpen check wouldn't catch it —
+    /// without this the host would report healthy while consuming nothing and the
+    /// supervisor would never rebuild it. Clear the tag so health flips false.
+    ///
+    /// Tag-guarded: a late event from an already-replaced consumer carries the old
+    /// tag and is ignored, so it can't null a freshly-rebuilt consumer's tag.
+    /// Reference assignment is atomic; matching the existing lock-free read of
+    /// <c>_consumerTag</c> in <see cref="IsHealthy"/>, a lagging probe costs at
+    /// most one tick.
+    /// </summary>
+    private Task OnConsumerUnregisteredAsync(object sender, ConsumerEventArgs ea)
+    {
+        var tag = _consumerTag;
+        if (tag is not null && Array.IndexOf(ea.ConsumerTags, tag) >= 0)
+        {
+            _logger.LogWarning(
+                "Consumer {ConsumerType} on {Queue} was unregistered by the broker — flagging for rebuild",
+                _registration.ConsumerType.Name, _queueName);
+            _consumerTag = null;
+        }
+        return Task.CompletedTask;
     }
 
     private async Task OnMessageReceivedAsync(object sender, BasicDeliverEventArgs ea)
