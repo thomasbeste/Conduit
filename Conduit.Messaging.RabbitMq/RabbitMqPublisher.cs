@@ -26,7 +26,7 @@ namespace Conduit.Messaging.RabbitMq;
 /// all stopped landing).
 /// </summary>
 public sealed class RabbitMqPublisher(
-    IConnection connection,
+    Func<CancellationToken, Task<IConnection>> connectionProvider,
     ILogger logger) : IMessagePublisher, IAsyncDisposable
 {
     /// <summary>
@@ -152,13 +152,14 @@ public sealed class RabbitMqPublisher(
             if (_channel is { IsOpen: true })
                 return _channel;
 
-            // Connection may itself be mid-recovery after a broker bounce.
-            // CreateChannelAsync will throw if so — let it propagate; the
-            // outer caller will retry on the next publish attempt.
             if (_channel is not null)
             {
                 try { _channel.Dispose(); } catch { /* best-effort cleanup of the dead channel */ }
             }
+            // Resolve a live connection — the provider recreates the underlying
+            // IConnection if the previous one died permanently (not just the
+            // channel), so a publisher can't be stranded on a dead connection.
+            var connection = await connectionProvider(cancellationToken);
             _channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
             _declaredExchanges.Clear();
             logger.LogInformation("RabbitMQ publish channel created");

@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
 using System.Text;
@@ -45,7 +44,8 @@ public sealed class AzureServiceBusMessageBus(
     private ServiceBusClient? _client;
     private ServiceBusAdministrationClient? _adminClient;
     private AzureServiceBusPublisher? _publisher;
-    private readonly ConcurrentBag<ServiceBusProcessor> _processors = [];
+    private readonly List<AzureServiceBusConsumerHost> _consumerHosts = [];
+    private ConsumerSupervisor? _supervisor;
     private bool _started;
 
     public IMessagePublisher Publisher => _publisher
@@ -108,43 +108,52 @@ public sealed class AzureServiceBusMessageBus(
         foreach (var reg in consumerRegistrations)
         {
             var subscriptionName = BuildSubscriptionName(serviceName, reg.MessageType.Name);
-
-            // Start processor
-            var processor = _client!.CreateProcessor(settings.TopicName, subscriptionName, new ServiceBusProcessorOptions
-            {
-                MaxConcurrentCalls = settings.MaxConcurrentCalls,
-                AutoCompleteMessages = false
-            });
-
             var consumerType = reg.ConsumerType;
             var messageType = reg.MessageType;
             var dispatcher = reg.GetDispatcher();
 
-            var capturedSubscription = subscriptionName;
-            processor.ProcessMessageAsync += args => ProcessMessageAsync(
-                input: new IncomingAsbMessage(
-                    Body: args.Message.Body.ToString(),
-                    MessageId: args.Message.MessageId,
-                    DeliveryCount: args.Message.DeliveryCount,
-                    ApplicationProperties: args.Message.ApplicationProperties),
-                consumerType: consumerType,
-                messageType: messageType,
-                dispatcher: dispatcher,
-                subscriptionName: capturedSubscription,
-                complete: ct => args.CompleteMessageAsync(args.Message, ct),
-                deadLetter: (reason, description, ct) => args.DeadLetterMessageAsync(args.Message, reason, description, ct),
-                abandon: ct => args.AbandonMessageAsync(args.Message, cancellationToken: ct),
-                cancellationToken: args.CancellationToken);
-
-            processor.ProcessErrorAsync += args =>
+            // Factory rebuilds the processor + its handlers on demand, so the
+            // supervisor can recreate one that has closed/faulted. The dispatch
+            // logic (ProcessMessageAsync) stays here and is captured by closure.
+            Func<ServiceBusProcessor> processorFactory = () =>
             {
-                logger.LogError(args.Exception, "Azure Service Bus processor error: {Source}", args.ErrorSource);
-                return Task.CompletedTask;
+                var processor = _client!.CreateProcessor(settings.TopicName, subscriptionName, new ServiceBusProcessorOptions
+                {
+                    MaxConcurrentCalls = settings.MaxConcurrentCalls,
+                    AutoCompleteMessages = false
+                });
+
+                processor.ProcessMessageAsync += args => ProcessMessageAsync(
+                    input: new IncomingAsbMessage(
+                        Body: args.Message.Body.ToString(),
+                        MessageId: args.Message.MessageId,
+                        DeliveryCount: args.Message.DeliveryCount,
+                        ApplicationProperties: args.Message.ApplicationProperties),
+                    consumerType: consumerType,
+                    messageType: messageType,
+                    dispatcher: dispatcher,
+                    subscriptionName: subscriptionName,
+                    complete: ct => args.CompleteMessageAsync(args.Message, ct),
+                    deadLetter: (reason, description, ct) => args.DeadLetterMessageAsync(args.Message, reason, description, ct),
+                    abandon: ct => args.AbandonMessageAsync(args.Message, cancellationToken: ct),
+                    cancellationToken: args.CancellationToken);
+
+                processor.ProcessErrorAsync += args =>
+                {
+                    logger.LogError(args.Exception, "Azure Service Bus processor error: {Source}", args.ErrorSource);
+                    return Task.CompletedTask;
+                };
+
+                return processor;
             };
 
-            await processor.StartProcessingAsync(cancellationToken);
-            _processors.Add(processor);
+            _consumerHosts.Add(new AzureServiceBusConsumerHost(subscriptionName, processorFactory, logger));
         }
+
+        // Same transport-agnostic supervisor as RabbitMQ: starts every processor
+        // and keeps it processing for the life of the bus.
+        _supervisor = new ConsumerSupervisor(_consumerHosts, logger);
+        await _supervisor.StartAsync(cancellationToken);
 
         _started = true;
         logger.LogInformation(
@@ -158,10 +167,14 @@ public sealed class AzureServiceBusMessageBus(
 
         logger.LogInformation("Stopping Azure Service Bus message bus for {ServiceName}", serviceName);
 
-        foreach (var processor in _processors)
+        if (_supervisor is not null)
         {
-            await processor.StopProcessingAsync(cancellationToken);
-            await processor.DisposeAsync();
+            try { await _supervisor.DisposeAsync(); } catch (ObjectDisposedException) { }
+        }
+
+        foreach (var host in _consumerHosts)
+        {
+            try { await host.DisposeAsync(); } catch (ObjectDisposedException) { }
         }
 
         if (_client != null)

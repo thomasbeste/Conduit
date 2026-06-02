@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
 
+    <!-- Quality gate: every warning fails the build (library + tests). -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
     <!-- NuGet shared metadata -->
     <Authors>Thomas Albrecht-Beste</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
