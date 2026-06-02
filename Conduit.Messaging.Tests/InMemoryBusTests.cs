@@ -32,10 +32,10 @@ public class InMemoryBusTests
 
         var sp = services.BuildServiceProvider();
         var bus = sp.GetRequiredService<IMessageBus>();
-        await bus.StartAsync();
+        await bus.StartAsync(TestContext.Current.CancellationToken);
 
         var msg = new TestMessage("hello");
-        await bus.Publisher.PublishAsync(msg);
+        await bus.Publisher.PublishAsync(msg, TestContext.Current.CancellationToken);
 
         var inMemory = sp.GetRequiredService<InMemoryMessageBus>();
         var published = inMemory.GetPublished<TestMessage>().ToList();
@@ -58,10 +58,10 @@ public class InMemoryBusTests
 
         Assert.False(bus.GetHealth().IsHealthy);
 
-        await bus.StartAsync();
+        await bus.StartAsync(TestContext.Current.CancellationToken);
         Assert.True(bus.GetHealth().IsHealthy);
 
-        await bus.StopAsync();
+        await bus.StopAsync(TestContext.Current.CancellationToken);
         Assert.False(bus.GetHealth().IsHealthy);
     }
 
@@ -78,10 +78,10 @@ public class InMemoryBusTests
 
         var sp = services.BuildServiceProvider();
         var bus = sp.GetRequiredService<IMessageBus>();
-        await bus.StartAsync();
+        await bus.StartAsync(TestContext.Current.CancellationToken);
 
         var msg = new TestMessage("target");
-        await bus.Publisher.PublishAsync(msg);
+        await bus.Publisher.PublishAsync(msg, TestContext.Current.CancellationToken);
 
         var inMemory = sp.GetRequiredService<InMemoryMessageBus>();
         var result = await inMemory.WaitForConsume<TestMessage>(m => m.Value == "target");

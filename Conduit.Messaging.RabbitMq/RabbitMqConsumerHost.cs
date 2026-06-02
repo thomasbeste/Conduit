@@ -12,35 +12,23 @@ using RabbitMQ.Client.Exceptions;
 namespace Conduit.Messaging.RabbitMq;
 
 /// <summary>
-/// Hosts a single consumer channel, declares queue/exchange/binding, dispatches messages,
-/// and self-heals across broker disconnects / channel shutdowns.
+/// Hosts a single RabbitMQ consumer as an <see cref="ISupervisedConsumer"/>: it
+/// declares queue/exchange/binding, dispatches messages, and exposes the two
+/// primitives the transport-agnostic <see cref="ConsumerSupervisor"/> drives —
+/// <see cref="IsHealthy"/> and <see cref="EnsureRunningAsync"/>.
 ///
-/// Self-healing contract (issue #687-era audit incident, 2026-05-16):
-///   - The host owns its own IChannel, created lazily from the long-lived
-///     <see cref="IConnection"/> the bus owns.
-///   - When the broker initiates a shutdown (code 320 CONNECTION_FORCED on
-///     pod restart) the channel's ChannelShutdownAsync event fires; the
-///     host catches it, drops the dead channel, waits for the connection
-///     to come back, and rebuilds bindings + consumer from scratch.
-///   - The IConnection has AutomaticRecoveryEnabled + TopologyRecoveryEnabled
-///     (configured on the factory in <see cref="RabbitMqMessageBus"/>) so the
-///     connection itself comes back. We additionally hook RecoverySucceededAsync
-///     as a redundant signal — belt and braces.
+/// Durability is NOT delegated to the client library's best-effort automatic
+/// recovery (which, after a long enough broker crashloop, can stop firing
+/// recovery events and strand the consumer until the process restarts — the
+/// 2026-06-02 incident). Instead the host can rebuild from ANY dead state on
+/// demand: it resolves a live <see cref="IConnection"/> through the
+/// connection provider (which recreates the underlying connection when it has
+/// died), then rebuilds its channel + bindings + consumer. The supervisor polls
+/// <see cref="IsHealthy"/> and calls <see cref="EnsureRunningAsync"/> whenever it
+/// is false — forever — so any outage heals the moment the broker is reachable.
 /// </summary>
-public sealed class RabbitMqConsumerHost(
-    IConnection connection,
-    ConsumerRegistration registration,
-    string serviceName,
-    RabbitMqSettings settings,
-    IServiceProvider serviceProvider,
-    ILogger logger,
-    Func<Action<object, Type>?>? getOnMessageConsumed = null)
+public sealed class RabbitMqConsumerHost : ISupervisedConsumer
 {
-    // Single Meter for the RMQ transport. Mirrors the ASB host: one counter
-    // for signed-baggage mismatches (Attacker D — broker access on k3s/k3d),
-    // one for any other hydration failure (deploy bug — malformed baggage,
-    // config error). Tag set kept low-cardinality (exchange + service only —
-    // never message id or baggage value).
     internal static readonly Meter Meter = new("Conduit.Messaging.RabbitMq");
 
     private static readonly Counter<long> IdentitySignatureMismatchCounter =
@@ -55,172 +43,129 @@ public sealed class RabbitMqConsumerHost(
             unit: "{message}",
             description: "Messages dead-lettered because pipeline-context hydration failed for a non-signature reason.");
 
-    private readonly Func<Action<object, Type>?> _getOnMessageConsumed = getOnMessageConsumed ?? (() => null);
+    private readonly Func<CancellationToken, Task<IConnection>> _connectionProvider;
+    private readonly ConsumerRegistration _registration;
+    private readonly string _serviceName;
+    private readonly RabbitMqSettings _settings;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger _logger;
+    private readonly Func<Action<object, Type>?> _getOnMessageConsumed;
+
+    private readonly string _exchangeName;
+    private readonly string _queueName;
+    private readonly string _dlxExchange;
+    private readonly string _dlqQueue;
+
+    private readonly SemaphoreSlim _rebuildLock = new(1, 1);
     private IChannel? _channel;
     private string? _consumerTag;
-    private readonly SemaphoreSlim _restartLock = new(1, 1);
-    private CancellationTokenSource? _hostCts;
-    private bool _stopping;
+    private volatile bool _disposed;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public RabbitMqConsumerHost(
+        Func<CancellationToken, Task<IConnection>> connectionProvider,
+        ConsumerRegistration registration,
+        string serviceName,
+        RabbitMqSettings settings,
+        IServiceProvider serviceProvider,
+        ILogger logger,
+        Func<Action<object, Type>?>? getOnMessageConsumed = null)
     {
-        _hostCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _connectionProvider = connectionProvider;
+        _registration = registration;
+        _serviceName = serviceName;
+        _settings = settings;
+        _serviceProvider = serviceProvider;
+        _logger = logger;
+        _getOnMessageConsumed = getOnMessageConsumed ?? (() => null);
 
-        // Belt + braces: hook the connection's recovery callback so we rebuild
-        // the consumer end-to-end after a broker bounce, even if the channel
-        // shutdown event raced ahead of us.
-        connection.RecoverySucceededAsync += OnConnectionRecoveryAsync;
-
-        await OpenAndBindAsync(_hostCts.Token);
+        _exchangeName = MessageSerializer.GetExchangeName(registration.MessageType);
+        _queueName = MessageSerializer.GetQueueName(serviceName, registration.ConsumerType);
+        _dlxExchange = $"{_exchangeName}.dlx";
+        _dlqQueue = $"{_queueName}.dlq";
     }
 
-    private async Task OpenAndBindAsync(CancellationToken cancellationToken)
+    public string Name => _queueName;
+
+    /// <summary>
+    /// Live iff we hold an open channel with an active consumer. A closed channel
+    /// (broker forced-close, network blip) or a never-built one both read false,
+    /// which is exactly the signal the supervisor rebuilds on. Never throws.
+    /// </summary>
+    public bool IsHealthy => !_disposed && _channel is { IsOpen: true } && _consumerTag is not null;
+
+    /// <summary>
+    /// Idempotent rebuild-to-running. Resolves a live connection (recreated by the
+    /// provider if the current one is dead), then rebuilds the channel + topology
+    /// + consumer if they are not already healthy. A no-op when already healthy.
+    /// </summary>
+    public async Task EnsureRunningAsync(CancellationToken cancellationToken)
     {
-        var exchangeName = MessageSerializer.GetExchangeName(registration.MessageType);
-        var queueName = MessageSerializer.GetQueueName(serviceName, registration.ConsumerType);
-        var dlxExchange = $"{exchangeName}.dlx";
-        var dlqQueue = $"{queueName}.dlq";
+        if (_disposed) return;
 
-        // Open a fresh channel. Retried-with-backoff so a publisher attempt
-        // during the same broker hiccup doesn't see "consumer dead" for long.
-        _channel = await CreateChannelWithRetryAsync(cancellationToken);
-
-        // The channel-shutdown handler is what kicks self-healing for the
-        // common case (broker forced close, network blip).
-        _channel.ChannelShutdownAsync += OnChannelShutdownAsync;
-
-        await _channel.BasicQosAsync(0, settings.PrefetchCount, false, cancellationToken);
-
-        // Dead-letter exchange + queue
-        await _channel.ExchangeDeclareAsync(dlxExchange, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
-        await _channel.QueueDeclareAsync(dlqQueue, durable: true, exclusive: false, autoDelete: false, cancellationToken: cancellationToken);
-        await _channel.QueueBindAsync(dlqQueue, dlxExchange, "", cancellationToken: cancellationToken);
-
-        // Message type exchange
-        await _channel.ExchangeDeclareAsync(exchangeName, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
-
-        var queueArgs = new Dictionary<string, object?>
-        {
-            // Consumer queues MUST be quorum. Only quorum queues stamp the
-            // x-delivery-count header that GetDeliveryCount reads to enforce
-            // RetryCount — classic queues never set it, so the retry counter
-            // capped at 1, `deliveryCount < RetryCount` stayed true forever,
-            // and a single deterministic consumer failure (e.g. an orphaned
-            // command hitting an FK violation) requeued infinitely, wedging
-            // the broker and starving every other message. The DLQ existed
-            // but the retry-exhaustion path could never reach it.
-            // x-delivery-limit is the broker-native backstop: quorum
-            // auto-dead-letters once delivery count exceeds it, independent
-            // of the app-side nack logic. Set just above RetryCount so the
-            // app-side requeue:false (cleaner, logged) fires first.
-            ["x-queue-type"] = "quorum",
-            ["x-delivery-limit"] = settings.RetryCount + 1,
-            ["x-dead-letter-exchange"] = dlxExchange,
-            ["x-dead-letter-routing-key"] = dlqQueue
-        };
-        await _channel.QueueDeclareAsync(queueName, durable: true, exclusive: false, autoDelete: false,
-            arguments: queueArgs, cancellationToken: cancellationToken);
-        await _channel.QueueBindAsync(queueName, exchangeName, "", cancellationToken: cancellationToken);
-
-        // Start consuming
-        var consumer = new AsyncEventingBasicConsumer(_channel);
-        consumer.ReceivedAsync += OnMessageReceivedAsync;
-        _consumerTag = await _channel.BasicConsumeAsync(queueName, autoAck: false, consumer: consumer, cancellationToken: cancellationToken);
-
-        logger.LogInformation(
-            "Consumer {ConsumerType} started on queue {Queue} bound to {Exchange}",
-            registration.ConsumerType.Name, queueName, exchangeName);
-    }
-
-    private async Task<IChannel> CreateChannelWithRetryAsync(CancellationToken cancellationToken)
-    {
-        // The connection may be mid-recovery. Bounded backoff so a dead
-        // broker doesn't hang the host indefinitely, but generous enough
-        // to cover a typical k8s pod restart (~30-60s).
-        const int maxAttempts = 30;
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                return await connection.CreateChannelAsync(cancellationToken: cancellationToken);
-            }
-            catch (Exception ex) when (attempt < maxAttempts)
-            {
-                var delay = Math.Min(attempt * 2, 30);
-                logger.LogWarning(
-                    "Consumer {ConsumerType} channel-create attempt {Attempt}/{Max} failed ({Reason}), retrying in {Delay}s",
-                    registration.ConsumerType.Name, attempt, maxAttempts, ex.GetType().Name, delay);
-                try { await Task.Delay(TimeSpan.FromSeconds(delay), cancellationToken); }
-                catch (OperationCanceledException) { throw; }
-            }
-        }
-    }
-
-    private async Task OnChannelShutdownAsync(object sender, ShutdownEventArgs args)
-    {
-        if (_stopping) return;
-        logger.LogWarning(
-            "Consumer {ConsumerType} channel shutdown ({Code} {Text}) — rebuilding",
-            registration.ConsumerType.Name, args.ReplyCode, args.ReplyText);
-        await RestartAsync();
-    }
-
-    private async Task OnConnectionRecoveryAsync(object sender, AsyncEventArgs args)
-    {
-        if (_stopping) return;
-        // The channel-shutdown handler usually wins this race; this branch
-        // is the fallback for cases where channel events were lost.
-        if (_channel is { IsOpen: true }) return;
-        logger.LogInformation(
-            "Consumer {ConsumerType} reacting to connection recovery — rebuilding",
-            registration.ConsumerType.Name);
-        await RestartAsync();
-    }
-
-    private async Task RestartAsync()
-    {
-        // Serialise restarts so a channel-shutdown and a connection-recovery
-        // event firing back-to-back don't double-open the consumer.
-        if (!await _restartLock.WaitAsync(0))
-        {
-            // Another restart is in flight; let it do the work.
-            return;
-        }
+        await _rebuildLock.WaitAsync(cancellationToken);
         try
         {
-            if (_stopping || _hostCts is null) return;
+            if (_disposed || IsHealthy) return;
 
-            // Detach the old handler so the about-to-be-disposed channel
-            // can't re-enter Restart on its own shutdown.
+            // Drop a dead channel before building a new one. The old consumer is
+            // tied to it; disposing detaches everything cleanly.
             if (_channel is not null)
             {
-                try { _channel.ChannelShutdownAsync -= OnChannelShutdownAsync; } catch { /* best-effort */ }
-                try { _channel.Dispose(); } catch { /* dead */ }
+                try { _channel.Dispose(); } catch { /* already dead */ }
                 _channel = null;
+                _consumerTag = null;
             }
-            _consumerTag = null;
 
-            try
+            // Resolve a live connection. The provider recreates the underlying
+            // IConnection if it has permanently died — this is the step that the
+            // old event-driven design could never reach.
+            var connection = await _connectionProvider(cancellationToken);
+
+            var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+            await channel.BasicQosAsync(0, _settings.PrefetchCount, false, cancellationToken);
+
+            // Dead-letter exchange + queue.
+            await channel.ExchangeDeclareAsync(_dlxExchange, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
+            await channel.QueueDeclareAsync(_dlqQueue, durable: true, exclusive: false, autoDelete: false, cancellationToken: cancellationToken);
+            await channel.QueueBindAsync(_dlqQueue, _dlxExchange, "", cancellationToken: cancellationToken);
+
+            // Message-type exchange.
+            await channel.ExchangeDeclareAsync(_exchangeName, "fanout", durable: true, autoDelete: false, cancellationToken: cancellationToken);
+
+            var queueArgs = new Dictionary<string, object?>
             {
-                await OpenAndBindAsync(_hostCts.Token);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex,
-                    "Consumer {ConsumerType} rebuild failed — connection recovery will retry on next event",
-                    registration.ConsumerType.Name);
-            }
+                // Consumer queues MUST be quorum: only quorum stamps the
+                // x-delivery-count header GetDeliveryCount reads to enforce the
+                // retry cap. x-delivery-limit is the broker-native poison backstop.
+                ["x-queue-type"] = "quorum",
+                ["x-delivery-limit"] = _settings.RetryCount + 1,
+                ["x-dead-letter-exchange"] = _dlxExchange,
+                ["x-dead-letter-routing-key"] = _dlqQueue
+            };
+            await channel.QueueDeclareAsync(_queueName, durable: true, exclusive: false, autoDelete: false,
+                arguments: queueArgs, cancellationToken: cancellationToken);
+            await channel.QueueBindAsync(_queueName, _exchangeName, "", cancellationToken: cancellationToken);
+
+            var consumer = new AsyncEventingBasicConsumer(channel);
+            consumer.ReceivedAsync += OnMessageReceivedAsync;
+            var consumerTag = await channel.BasicConsumeAsync(_queueName, autoAck: false, consumer: consumer, cancellationToken: cancellationToken);
+
+            _channel = channel;
+            _consumerTag = consumerTag;
+
+            _logger.LogInformation(
+                "Consumer {ConsumerType} consuming on queue {Queue} bound to {Exchange}",
+                _registration.ConsumerType.Name, _queueName, _exchangeName);
         }
         finally
         {
-            _restartLock.Release();
+            _rebuildLock.Release();
         }
     }
 
     private async Task OnMessageReceivedAsync(object sender, BasicDeliverEventArgs ea)
     {
-        // Capture the channel into a local so a concurrent restart doesn't
-        // null it out mid-handler.
+        // Capture the channel locally so a concurrent rebuild can't null it mid-handler.
         var channel = _channel;
         if (channel is null) return;
 
@@ -228,12 +173,11 @@ public sealed class RabbitMqConsumerHost(
 
         try
         {
-            var (message, envelope) = MessageSerializer.Deserialize(ea.Body, registration.MessageType);
+            var (message, envelope) = MessageSerializer.Deserialize(ea.Body, _registration.MessageType);
 
             if (message == null)
             {
-                logger.LogWarning("Deserialized null message from {Exchange}, nacking without requeue",
-                    ea.Exchange);
+                _logger.LogWarning("Deserialized null message from {Exchange}, nacking without requeue", ea.Exchange);
                 await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
                 return;
             }
@@ -249,10 +193,8 @@ public sealed class RabbitMqConsumerHost(
                 Headers = ParseHeaders(ea.BasicProperties.Headers)
             };
 
-            // Resolve consumer from DI and dispatch
-            await using var scope = serviceProvider.CreateAsyncScope();
+            await using var scope = _serviceProvider.CreateAsyncScope();
 
-            // Hydrate pipeline context with cross-process state (baggage, causality) if available
             var pipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
             if (pipelineContext is not null)
             {
@@ -263,107 +205,71 @@ public sealed class RabbitMqConsumerHost(
                 }
                 catch (IdentitySignatureMismatchException ex)
                 {
-                    // Fail loud + DLQ immediately. The queue is bound to a
-                    // dead-letter exchange (see OpenAndBindAsync), so a Nack
-                    // with requeue=false routes the message straight to the
-                    // DLQ without spending RetryCount cycles requeuing it.
-                    // Mirrors AzureServiceBusMessageBus.cs (PR #918) for the
-                    // ASB leg of the same fix (issue #970).
                     IdentitySignatureMismatchCounter.Add(
                         1,
                         new KeyValuePair<string, object?>("exchange", ea.Exchange),
-                        new KeyValuePair<string, object?>("service", serviceName));
-                    logger.LogError(
+                        new KeyValuePair<string, object?>("service", _serviceName));
+                    _logger.LogError(
                         "Dead-lettering RMQ message {MessageId} from {Exchange}: identity-signature-invalid ({Reason})",
                         ea.BasicProperties.MessageId, ea.Exchange, ex.Message);
-                    try
-                    {
-                        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
-                    }
-                    catch (AlreadyClosedException)
-                    {
-                        // Channel died mid-nack; the broker will redeliver on
-                        // reconnect and we'll re-hit this same branch then.
-                    }
+                    try { await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false); }
+                    catch (AlreadyClosedException) { }
                     return;
                 }
                 catch (Exception ex)
                 {
-                    // Any other hydration failure (malformed baggage, config
-                    // error) is a deploy bug — DLQ so it surfaces loudly
-                    // instead of dispatching with a half-populated principal.
                     HydrationErrorCounter.Add(
                         1,
                         new KeyValuePair<string, object?>("exchange", ea.Exchange),
-                        new KeyValuePair<string, object?>("service", serviceName));
-                    logger.LogError(
-                        ex,
+                        new KeyValuePair<string, object?>("service", _serviceName));
+                    _logger.LogError(ex,
                         "Dead-lettering RMQ message {MessageId} from {Exchange}: pipeline-context hydration failed",
                         ea.BasicProperties.MessageId, ea.Exchange);
-                    try
-                    {
-                        await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
-                    }
-                    catch (AlreadyClosedException)
-                    {
-                    }
+                    try { await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false); }
+                    catch (AlreadyClosedException) { }
                     return;
                 }
 
-                // Set ambient context so consumers can access it via PipelineContext.Current
                 if (pipelineContext is PipelineContext concrete)
                     PipelineContext.SetCurrent(concrete);
             }
 
-            var consumerInstance = scope.ServiceProvider.GetRequiredService(registration.ConsumerType);
-            await registration.GetDispatcher().DispatchAsync(consumerInstance, message, context, CancellationToken.None);
+            var consumerInstance = scope.ServiceProvider.GetRequiredService(_registration.ConsumerType);
+            await _registration.GetDispatcher().DispatchAsync(consumerInstance, message, context, CancellationToken.None);
 
             await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
-            _getOnMessageConsumed()?.Invoke(message, registration.MessageType);
+            _getOnMessageConsumed()?.Invoke(message, _registration.MessageType);
         }
         catch (AlreadyClosedException)
         {
-            // Channel died mid-dispatch. The shutdown handler is already
-            // arranging a restart; don't try to ack/nack a dead channel.
-            logger.LogWarning(
-                "Consumer {ConsumerType}: channel closed during dispatch — restart in progress",
-                registration.ConsumerType.Name);
+            // Channel died mid-dispatch. The supervisor's next health probe sees
+            // a closed channel and rebuilds; the broker redelivers the unacked
+            // message to the fresh consumer. Nothing to do here.
+            _logger.LogWarning(
+                "Consumer {ConsumerType}: channel closed during dispatch — supervisor will rebuild",
+                _registration.ConsumerType.Name);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error consuming message from {Exchange} (delivery #{Count})",
-                ea.Exchange, deliveryCount);
+            _logger.LogError(ex, "Error consuming message from {Exchange} (delivery #{Count})", ea.Exchange, deliveryCount);
 
-            // Requeue if under retry limit, otherwise dead-letter
-            var shouldRequeue = deliveryCount < settings.RetryCount;
+            var shouldRequeue = deliveryCount < _settings.RetryCount;
             try
             {
                 await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: shouldRequeue);
             }
-            catch (AlreadyClosedException)
-            {
-                // Same as above — restart will pick up the unacked message
-                // when it comes back; broker requeues it after consumer-tag
-                // cancellation.
-            }
+            catch (AlreadyClosedException) { }
 
             if (!shouldRequeue)
             {
-                logger.LogWarning(
-                    "Message from {Exchange} exceeded retry limit ({RetryCount}), sent to DLQ",
-                    ea.Exchange, settings.RetryCount);
+                _logger.LogWarning("Message from {Exchange} exceeded retry limit ({RetryCount}), sent to DLQ",
+                    ea.Exchange, _settings.RetryCount);
             }
         }
     }
 
     private static int GetDeliveryCount(BasicDeliverEventArgs ea)
     {
-        // Quorum queues stamp x-delivery-count on every redelivery. It arrives
-        // as an AMQP long, so match both long and int — reading it as int-only
-        // would silently fall through to 0 and re-break the retry cap. Classic
-        // queues never set the header; the Redelivered fallback only tells
-        // first-vs-not (caps retries at 1) which is why consumer queues are
-        // declared quorum (see OpenAndBindAsync).
         if (ea.BasicProperties.Headers?.TryGetValue("x-delivery-count", out var count) == true)
         {
             return count switch
@@ -391,33 +297,37 @@ public sealed class RabbitMqConsumerHost(
         return result;
     }
 
-    public async Task StopAsync(CancellationToken cancellationToken)
+    public async ValueTask DisposeAsync()
     {
-        _stopping = true;
-        try { connection.RecoverySucceededAsync -= OnConnectionRecoveryAsync; } catch { /* best-effort */ }
-        _hostCts?.Cancel();
+        _disposed = true;
+        await _rebuildLock.WaitAsync();
         try
         {
             if (_channel is not null)
             {
-                try { _channel.ChannelShutdownAsync -= OnChannelShutdownAsync; } catch { /* best-effort */ }
-                if (_channel.IsOpen)
+                try
                 {
-                    if (_consumerTag != null)
-                        await _channel.BasicCancelAsync(_consumerTag, cancellationToken: cancellationToken);
-
-                    await _channel.CloseAsync(cancellationToken);
+                    if (_channel.IsOpen)
+                    {
+                        if (_consumerTag is not null)
+                            await _channel.BasicCancelAsync(_consumerTag);
+                        await _channel.CloseAsync();
+                    }
+                }
+                catch (ObjectDisposedException) { }
+                catch (AlreadyClosedException) { }
+                finally
+                {
+                    _channel.Dispose();
+                    _channel = null;
+                    _consumerTag = null;
                 }
             }
         }
-        catch (ObjectDisposedException) { }
-        catch (AlreadyClosedException) { }
         finally
         {
-            _channel?.Dispose();
-            _channel = null;
-            _hostCts?.Dispose();
-            _restartLock.Dispose();
+            _rebuildLock.Release();
+            _rebuildLock.Dispose();
         }
     }
 }

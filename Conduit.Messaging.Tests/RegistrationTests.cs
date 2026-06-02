@@ -73,10 +73,10 @@ public class RegistrationTests
 
         var sp = services.BuildServiceProvider();
         var bus = sp.GetRequiredService<IMessageBus>();
-        await bus.StartAsync();
+        await bus.StartAsync(TestContext.Current.CancellationToken);
 
         // If assembly scanning found TestConsumer, publishing should dispatch to it
-        await bus.Publisher.PublishAsync(new TestMessage("scanned"));
+        await bus.Publisher.PublishAsync(new TestMessage("scanned"), TestContext.Current.CancellationToken);
 
         var inMemory = sp.GetRequiredService<InMemoryMessageBus>();
         var consumed = inMemory.GetConsumed<TestMessage>().ToList();
