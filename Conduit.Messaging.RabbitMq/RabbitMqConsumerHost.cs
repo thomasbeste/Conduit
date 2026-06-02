@@ -43,6 +43,12 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
             unit: "{message}",
             description: "Messages dead-lettered because pipeline-context hydration failed for a non-signature reason.");
 
+    private static readonly Counter<long> TopologyMismatchCounter =
+        Meter.CreateCounter<long>(
+            "messaging.rmq.topology_mismatch",
+            unit: "{rebuild}",
+            description: "Consumer rebuilds that failed because the queue exists with incompatible arguments (406 PRECONDITION_FAILED).");
+
     private readonly Func<CancellationToken, Task<IConnection>> _connectionProvider;
     private readonly ConsumerRegistration _registration;
     private readonly string _serviceName;
@@ -60,6 +66,10 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
     private IChannel? _channel;
     private string? _consumerTag;
     private volatile bool _disposed;
+    // Latch so an incompatible-queue-args (406) failure is logged loud ONCE, not
+    // on every supervisor probe. Reset on a successful rebuild so a fault that
+    // recurs after an operator fix is surfaced again.
+    private bool _loggedTopologyMismatch;
 
     public RabbitMqConsumerHost(
         Func<CancellationToken, Task<IConnection>> connectionProvider,
@@ -103,6 +113,8 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
         if (_disposed) return;
 
         await _rebuildLock.WaitAsync(cancellationToken);
+        // Declared outside the try so the catch can dispose a half-built channel.
+        IChannel? channel = null;
         try
         {
             if (_disposed || IsHealthy) return;
@@ -121,7 +133,7 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
             // old event-driven design could never reach.
             var connection = await _connectionProvider(cancellationToken);
 
-            var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+            channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
             await channel.BasicQosAsync(0, _settings.PrefetchCount, false, cancellationToken);
 
             // Dead-letter exchange + queue.
@@ -148,19 +160,92 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
 
             var consumer = new AsyncEventingBasicConsumer(channel);
             consumer.ReceivedAsync += OnMessageReceivedAsync;
+            // Broker-initiated cancel (queue deleted/recreated, quorum leader
+            // change, ...) can land with the CHANNEL still open, so the IsOpen
+            // probe alone would keep reporting healthy while we're no longer
+            // consuming — a silent zombie. UnregisteredAsync is v7's signal for
+            // that; clearing the tag flips IsHealthy false so the supervisor
+            // rebuilds. (See OnConsumerUnregisteredAsync for the tag guard.)
+            consumer.UnregisteredAsync += OnConsumerUnregisteredAsync;
             var consumerTag = await channel.BasicConsumeAsync(_queueName, autoAck: false, consumer: consumer, cancellationToken: cancellationToken);
 
             _channel = channel;
             _consumerTag = consumerTag;
+            _loggedTopologyMismatch = false; // rebuilt cleanly — re-arm the loud log
 
             _logger.LogInformation(
                 "Consumer {ConsumerType} consuming on queue {Queue} bound to {Exchange}",
                 _registration.ConsumerType.Name, _queueName, _exchangeName);
         }
+        catch (Exception ex)
+        {
+            // We never hand the channel to _channel until the success path below
+            // the consume call. So if we're here, this channel is orphaned —
+            // dispose it, or a rebuild that fails every probe (a persistent 406,
+            // a mid-declare connection drop) leaks a channel object each tick.
+            if (channel is not null && !ReferenceEquals(channel, _channel))
+            {
+                try { channel.Dispose(); } catch { /* already dead */ }
+            }
+
+            // PRECONDITION_FAILED (406): the queue already exists with arguments
+            // that don't match what we declare (a pre-existing classic queue, or
+            // RetryCount changed between releases so x-delivery-limit differs).
+            // This NEVER heals on its own, so instead of the supervisor's generic
+            // retry log every tick, surface it loud + ONCE with the fix and count
+            // it. Still rethrow so the supervisor keeps probing — it recovers the
+            // moment an operator deletes/migrates the queue.
+            if (ex is OperationInterruptedException oie && oie.ShutdownReason?.ReplyCode == 406)
+            {
+                TopologyMismatchCounter.Add(
+                    1,
+                    new KeyValuePair<string, object?>("queue", _queueName),
+                    new KeyValuePair<string, object?>("service", _serviceName));
+                if (!_loggedTopologyMismatch)
+                {
+                    _loggedTopologyMismatch = true;
+                    _logger.LogError(oie,
+                        "Queue {Queue} exists with INCOMPATIBLE arguments — consumer {ConsumerType} cannot bind and will " +
+                        "stay down until the queue is deleted or migrated (expected quorum, x-delivery-limit={Limit}, " +
+                        "dead-letter-exchange={Dlx}). Reply: {Reply}. The supervisor keeps probing, so it recovers " +
+                        "automatically once the queue is fixed.",
+                        _queueName, _registration.ConsumerType.Name, _settings.RetryCount + 1, _dlxExchange,
+                        oie.ShutdownReason?.ReplyText);
+                }
+            }
+
+            throw;
+        }
         finally
         {
             _rebuildLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Broker unregistered our consumer (server-sent basic.cancel: queue deleted
+    /// or recreated, quorum leader change, etc.). This can fire with the channel
+    /// still open, so <see cref="IsHealthy"/>'s IsOpen check wouldn't catch it —
+    /// without this the host would report healthy while consuming nothing and the
+    /// supervisor would never rebuild it. Clear the tag so health flips false.
+    ///
+    /// Tag-guarded: a late event from an already-replaced consumer carries the old
+    /// tag and is ignored, so it can't null a freshly-rebuilt consumer's tag.
+    /// Reference assignment is atomic; matching the existing lock-free read of
+    /// <c>_consumerTag</c> in <see cref="IsHealthy"/>, a lagging probe costs at
+    /// most one tick.
+    /// </summary>
+    private Task OnConsumerUnregisteredAsync(object sender, ConsumerEventArgs ea)
+    {
+        var tag = _consumerTag;
+        if (tag is not null && Array.IndexOf(ea.ConsumerTags, tag) >= 0)
+        {
+            _logger.LogWarning(
+                "Consumer {ConsumerType} on {Queue} was unregistered by the broker — flagging for rebuild",
+                _registration.ConsumerType.Name, _queueName);
+            _consumerTag = null;
+        }
+        return Task.CompletedTask;
     }
 
     private async Task OnMessageReceivedAsync(object sender, BasicDeliverEventArgs ea)
