@@ -30,6 +30,11 @@ public sealed class ConsumerSupervisor(
     private readonly TimeSpan _probeInterval = probeInterval ?? TimeSpan.FromSeconds(15);
     private CancellationTokenSource? _cts;
     private Task? _loop;
+    // Names of consumers we've already logged as down, so a persistent fault
+    // (broker still gone, incompatible queue args) is announced once at Warning
+    // and then kept at Debug — not re-spammed every probe. Cleared on recovery.
+    // Single-threaded: only the supervise loop touches it.
+    private readonly HashSet<string> _loggedDown = [];
 
     /// <summary>
     /// Bring every consumer up (best-effort), then start the background watchdog.
@@ -84,11 +89,18 @@ public sealed class ConsumerSupervisor(
 
                 if (healthy) continue;
 
+                // Announce the down-state once at Warning; while it persists,
+                // drop to Debug so a long outage doesn't spam every probe.
+                var firstTimeDown = _loggedDown.Add(consumer.Name);
+                if (firstTimeDown)
+                    logger.LogWarning("Consumer {Name} is not consuming — rebuilding", consumer.Name);
+                else
+                    logger.LogDebug("Consumer {Name} still not consuming — retrying rebuild", consumer.Name);
+
                 try
                 {
-                    logger.LogWarning("Consumer {Name} is not consuming — rebuilding", consumer.Name);
                     await consumer.EnsureRunningAsync(ct);
-                    if (consumer.IsHealthy)
+                    if (consumer.IsHealthy && _loggedDown.Remove(consumer.Name))
                         logger.LogInformation("Consumer {Name} rebuilt and consuming again", consumer.Name);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -98,10 +110,17 @@ public sealed class ConsumerSupervisor(
                 catch (Exception ex)
                 {
                     // Broker still unreachable, or rebuild raced another failure.
-                    // Don't escalate — next tick tries again. Forever.
-                    logger.LogWarning(ex,
-                        "Consumer {Name} rebuild failed; retrying in {Interval}s",
-                        consumer.Name, _probeInterval.TotalSeconds);
+                    // Don't escalate — next tick tries again. Forever. Loud on the
+                    // first failure, Debug thereafter so a persistent fault (broker
+                    // down, incompatible queue args) doesn't flood the log.
+                    if (firstTimeDown)
+                        logger.LogWarning(ex,
+                            "Consumer {Name} rebuild failed; will retry every {Interval}s until it recovers",
+                            consumer.Name, _probeInterval.TotalSeconds);
+                    else
+                        logger.LogDebug(ex,
+                            "Consumer {Name} rebuild still failing (every {Interval}s)",
+                            consumer.Name, _probeInterval.TotalSeconds);
                 }
             }
         }
