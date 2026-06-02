@@ -7,6 +7,7 @@
   <Project Path="Conduit/Conduit.csproj" />
   <Project Path="Conduit.Messaging/Conduit.Messaging.csproj" />
   <Project Path="Conduit.Messaging.AzureServiceBus/Conduit.Messaging.AzureServiceBus.csproj" />
+  <Project Path="Conduit.Messaging.IntegrationTests/Conduit.Messaging.IntegrationTests.csproj" />
   <Project Path="Conduit.Messaging.RabbitMq/Conduit.Messaging.RabbitMq.csproj" />
   <Folder Name="/Tests/">
     <Project Path="Conduit.Tests/Conduit.Tests.csproj" />

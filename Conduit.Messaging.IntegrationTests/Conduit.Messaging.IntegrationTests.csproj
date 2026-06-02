@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Real-broker integration tests: spin up RabbitMQ via Testcontainers and
+       exercise the actual Conduit RabbitMQ transport (publish -> broker ->
+       consume) AND its durability (broker restart -> consumers self-heal).
+       Kept separate from Conduit.Messaging.Tests so the unit suite stays fast
+       and Docker-free; CI runs this project where Docker is available. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Conduit.Messaging\Conduit.Messaging.csproj" />
+    <ProjectReference Include="..\Conduit.Messaging.RabbitMq\Conduit.Messaging.RabbitMq.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
+    <PackageReference Include="Testcontainers.RabbitMq" Version="4.11.0" />
+  </ItemGroup>
+
+</Project>
