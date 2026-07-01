@@ -56,60 +56,70 @@ public class AzureServiceBusMessagingAdmin(
     {
         var topic = options.Value.TopicName;
 
-        // Capture original config before destroying. Same retry-pre-deploy
-        // path that bicep would use; preserves message-type filter rule.
-        var props = (await AdminClient.GetSubscriptionAsync(topic, name, ct)).Value;
-        var runtime = (await AdminClient.GetSubscriptionRuntimePropertiesAsync(topic, name, ct)).Value;
-        var droppedCount = runtime.ActiveMessageCount;
-
-        // Capture rules so we don't lose the message-type filter on recreate.
-        var rules = new List<RuleProperties>();
-        await foreach (var rule in AdminClient.GetRulesAsync(topic, name, ct))
+        // Data-plane drain ONLY — NEVER delete/recreate the subscription.
+        // Topology is owned by the post-update-runner reconciler; nothing
+        // else may create or delete a subscription. An admin "clear active"
+        // that deleted the subscription is the silent-zombie failure mode
+        // (2026-05-15): if the recreate races/throws after the delete lands,
+        // the subscription is gone, the consumer's startup subscription check
+        // fails, and every publish for this message type is silently dropped
+        // until the next deploy reconciles it. It would also drop messages
+        // that arrive in the delete→recreate window, not just the backlog the
+        // operator asked to clear. This mirrors the RabbitMQ transport's
+        // in-place QueuePurge and the DLQ drain below: ReceiveAndDelete on the
+        // main entity, needs only the Listen claim, leaves topology untouched.
+        var receiver = Client.CreateReceiver(topic, name, new ServiceBusReceiverOptions
         {
-            rules.Add(rule);
-        }
+            ReceiveMode = ServiceBusReceiveMode.ReceiveAndDelete,
+        });
 
-        logger.LogWarning(
-            "Purging ASB subscription {Topic}/{Name} — dropping {Count} active messages",
-            topic, name, droppedCount);
+        using var opCts = new CancellationTokenSource(DrainOperationTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(opCts.Token, ct);
+        var token = linkedCts.Token;
 
-        await AdminClient.DeleteSubscriptionAsync(topic, name, ct);
-
-        var createOptions = new CreateSubscriptionOptions(topic, name)
-        {
-            MaxDeliveryCount = props.MaxDeliveryCount,
-            LockDuration = props.LockDuration,
-            DefaultMessageTimeToLive = props.DefaultMessageTimeToLive,
-            DeadLetteringOnMessageExpiration = props.DeadLetteringOnMessageExpiration,
-            EnableDeadLetteringOnFilterEvaluationExceptions = props.EnableDeadLetteringOnFilterEvaluationExceptions,
-            AutoDeleteOnIdle = props.AutoDeleteOnIdle,
-            EnableBatchedOperations = props.EnableBatchedOperations,
-            RequiresSession = props.RequiresSession,
-            ForwardTo = props.ForwardTo,
-            ForwardDeadLetteredMessagesTo = props.ForwardDeadLetteredMessagesTo,
-            UserMetadata = props.UserMetadata,
-            Status = props.Status,
-        };
-
-        // Re-apply rules. The default $Default rule auto-creates on
-        // CreateSubscriptionAsync — we delete it then add the originals
-        // so we end up with exactly what was there before.
-        await AdminClient.CreateSubscriptionAsync(createOptions, ct);
+        long drained = 0;
         try
         {
-            await AdminClient.DeleteRuleAsync(topic, name, "$Default", ct);
+            while (!token.IsCancellationRequested)
+            {
+                var batch = await receiver.ReceiveMessagesAsync(DlqDrainBatchSize, DlqReceiveWait, token);
+                if (batch.Count > 0)
+                {
+                    drained += batch.Count;
+                    continue;
+                }
+
+                // Empty batch could mean truly drained OR broker prefetch
+                // hasn't refilled yet. Check the authoritative runtime count
+                // before exiting — non-zero means keep probing until the
+                // budget runs out (same logic as the DLQ drain).
+                var runtime = await SafeGetRuntimeAsync(topic, name, token);
+                if (runtime is null || runtime.ActiveMessageCount == 0) break;
+
+                try
+                {
+                    await Task.Delay(PostEmptyBatchDelay, token);
+                }
+                catch (OperationCanceledException) { break; }
+            }
         }
-        catch
+        catch (OperationCanceledException) when (opCts.IsCancellationRequested && !ct.IsCancellationRequested)
         {
-            // No $Default rule — fine, originals had a custom one.
+            // Internal timeout fired — fall through, report what we drained
+            // plus authoritative remaining count.
         }
-        foreach (var rule in rules)
+        finally
         {
-            var ruleOptions = new CreateRuleOptions(rule.Name, rule.Filter) { Action = rule.Action };
-            await AdminClient.CreateRuleAsync(topic, name, ruleOptions, ct);
+            await receiver.CloseAsync(CancellationToken.None);
         }
 
-        return new DrainResult(droppedCount, 0);
+        var finalRuntime = await SafeGetRuntimeAsync(topic, name, CancellationToken.None);
+        var remaining = finalRuntime?.ActiveMessageCount ?? 0;
+
+        logger.LogWarning(
+            "Purged {Count} active messages from {Topic}/{Name} ({Remaining} remaining)",
+            drained, topic, name, remaining);
+        return new DrainResult(drained, remaining);
     }
 
     public async Task<DrainResult> PurgeDeadLetterAsync(string name, CancellationToken ct = default)
