@@ -88,7 +88,12 @@ public sealed class AzureServiceBusMessageBus(
                     "Publish-side topology discovered for {Topic}: {SubjectCount} subject(s) routable, hasWildcard={HasWildcard}",
                     settings.TopicName, publisherGuard.KnownSubjects.Count, publisherGuard.HasWildcardSubscription);
 
-                _publisher = new AzureServiceBusPublisher(_client, settings, publisherGuard);
+                // IClaimCheckStore is optional — resolved with GetService so
+                // Conduit stays usable without the feature. When absent, the
+                // publisher's offload is a no-op. Resolved from the root
+                // provider (the publisher is a singleton owned by the bus).
+                var claimCheckStore = serviceProvider.GetService<IClaimCheckStore>();
+                _publisher = new AzureServiceBusPublisher(_client, settings, publisherGuard, claimCheckStore);
                 logger.LogInformation("Azure Service Bus connection established for {ServiceName}", serviceName);
                 break;
             }
@@ -298,7 +303,32 @@ public sealed class AzureServiceBusMessageBus(
             await using var scope = serviceProvider.CreateAsyncScope();
             var consumer = scope.ServiceProvider.GetRequiredService(consumerType);
 
-            var message = JsonSerializer.Deserialize(input.Body, messageType);
+            // Transport-level claim-check rehydration: if this message carries a
+            // claim-check reference header, fetch the original body back from the
+            // store BEFORE deserialization so the handler sees the full payload.
+            // No-op when the header is absent. Store is optional (GetService).
+            // A missing blob (reaped/never-stored) is unrecoverable — dead-letter
+            // rather than abandon, since a retry can't heal it.
+            var claimCheckStore = scope.ServiceProvider.GetService<IClaimCheckStore>();
+            ReadOnlyMemory<byte> body;
+            try
+            {
+                body = await ClaimCheck.RehydrateAsync(
+                    Encoding.UTF8.GetBytes(input.Body),
+                    key => input.ApplicationProperties.TryGetValue(key, out var v) ? v?.ToString() : null,
+                    claimCheckStore,
+                    cancellationToken);
+            }
+            catch (ClaimCheckMissingException ex)
+            {
+                logger.LogError(
+                    "Dead-lettering ASB message {MessageId} on {Subscription}: claim-check payload {PayloadId} not found",
+                    input.MessageId, subscriptionName, ex.PayloadId);
+                await deadLetter("ClaimCheckMissing", ex.Message, cancellationToken);
+                return;
+            }
+
+            var message = JsonSerializer.Deserialize(body.Span, messageType);
             if (message == null) return;
 
             var headers = new Dictionary<string, string>();

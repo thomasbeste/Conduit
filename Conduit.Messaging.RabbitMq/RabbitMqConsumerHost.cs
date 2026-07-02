@@ -256,9 +256,24 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
 
         var deliveryCount = GetDeliveryCount(ea);
 
+        await using var scope = _serviceProvider.CreateAsyncScope();
+
         try
         {
-            var (message, envelope) = MessageSerializer.Deserialize(ea.Body, _registration.MessageType);
+            // Transport-level claim-check rehydration: if this delivery carries a
+            // claim-check reference header, fetch the original envelope bytes back
+            // from the store BEFORE deserialization. No-op when the header is
+            // absent. Store is optional (GetService). A missing blob is
+            // unrecoverable — nack WITHOUT requeue (dead-letter) rather than retry.
+            var claimCheckStore = scope.ServiceProvider.GetService<IClaimCheckStore>();
+            var rehydratedBody = await ClaimCheck.RehydrateAsync(
+                ea.Body,
+                key => ea.BasicProperties.Headers is { } hdrs && hdrs.TryGetValue(key, out var v)
+                    ? v is byte[] vb ? Encoding.UTF8.GetString(vb) : v?.ToString()
+                    : null,
+                claimCheckStore);
+
+            var (message, envelope) = MessageSerializer.Deserialize(rehydratedBody, _registration.MessageType);
 
             if (message == null)
             {
@@ -277,8 +292,6 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
                 DeliveryCount = deliveryCount,
                 Headers = ParseHeaders(ea.BasicProperties.Headers)
             };
-
-            await using var scope = _serviceProvider.CreateAsyncScope();
 
             var pipelineContext = scope.ServiceProvider.GetService<IPipelineContext>();
             if (pipelineContext is not null)
@@ -333,6 +346,17 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
             _logger.LogWarning(
                 "Consumer {ConsumerType}: channel closed during dispatch — supervisor will rebuild",
                 _registration.ConsumerType.Name);
+        }
+        catch (ClaimCheckMissingException ex)
+        {
+            // The message referenced an offloaded payload that is gone (reaped or
+            // never stored). A retry can't heal it — nack WITHOUT requeue so the
+            // broker dead-letters it immediately.
+            _logger.LogError(ex,
+                "Dead-lettering RMQ message {MessageId} from {Exchange}: claim-check payload {PayloadId} not found",
+                ea.BasicProperties.MessageId, ea.Exchange, ex.PayloadId);
+            try { await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false); }
+            catch (AlreadyClosedException) { }
         }
         catch (Exception ex)
         {

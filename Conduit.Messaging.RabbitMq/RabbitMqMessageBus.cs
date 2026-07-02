@@ -1,4 +1,5 @@
 using System.Security.Authentication;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 
@@ -53,7 +54,11 @@ public sealed class RabbitMqMessageBus(
         // Publisher + consumer hosts resolve the connection through
         // GetConnectionAsync; none holds a fixed reference, so a broker bounce
         // (or a permanently-dead connection) is recovered centrally.
-        _publisher = new RabbitMqPublisher(GetConnectionAsync, logger);
+        // IClaimCheckStore is optional (GetService) — offload is a no-op when
+        // no store is registered. The publisher is a singleton owned by the bus,
+        // so the store is resolved once from the root provider here.
+        var claimCheckStore = serviceProvider.GetService<IClaimCheckStore>();
+        _publisher = new RabbitMqPublisher(GetConnectionAsync, logger, claimCheckStore);
 
         foreach (var reg in consumerRegistrations)
         {

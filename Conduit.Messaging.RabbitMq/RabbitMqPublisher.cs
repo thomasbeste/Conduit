@@ -27,7 +27,8 @@ namespace Conduit.Messaging.RabbitMq;
 /// </summary>
 public sealed class RabbitMqPublisher(
     Func<CancellationToken, Task<IConnection>> connectionProvider,
-    ILogger logger) : IMessagePublisher, IAsyncDisposable
+    ILogger logger,
+    IClaimCheckStore? claimCheckStore = null) : IMessagePublisher, IAsyncDisposable
 {
     /// <summary>
     /// Tracks exchanges declared on the CURRENT channel. Reset whenever the
@@ -54,7 +55,7 @@ public sealed class RabbitMqPublisher(
         where TMessage : class
     {
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
-        var (body, properties) = BuildPayload(message, contextHeaders);
+        var (body, properties) = await BuildPayloadAsync(message, contextHeaders, cancellationToken);
         await PublishWithRecoveryAsync(exchangeName, "fanout", routingKey: "", properties, body, cancellationToken);
 
         logger.LogDebug("Published {MessageType} to exchange {Exchange}", typeof(TMessage).Name, exchangeName);
@@ -68,7 +69,7 @@ public sealed class RabbitMqPublisher(
         where TMessage : class
     {
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
-        var (body, properties) = BuildPayload(message, contextHeaders);
+        var (body, properties) = await BuildPayloadAsync(message, contextHeaders, cancellationToken);
         await PublishWithRecoveryAsync(exchangeName, "topic", routingKey: topic, properties, body, cancellationToken);
 
         logger.LogDebug("Published {MessageType} to exchange {Exchange} with topic {Topic}",
@@ -82,7 +83,7 @@ public sealed class RabbitMqPublisher(
     public async Task SendAsync<TMessage>(TMessage message, string queueName, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken = default)
         where TMessage : class
     {
-        var (body, properties) = BuildPayload(message, contextHeaders);
+        var (body, properties) = await BuildPayloadAsync(message, contextHeaders, cancellationToken);
 
         // Direct-to-queue via the default exchange. No exchange declare needed
         // (the default "" exchange always exists); still funnel through the
@@ -93,11 +94,22 @@ public sealed class RabbitMqPublisher(
         logger.LogDebug("Sent {MessageType} to queue {Queue}", typeof(TMessage).Name, queueName);
     }
 
-    private static (ReadOnlyMemory<byte> Body, BasicProperties Properties) BuildPayload<TMessage>(
-        TMessage message, IReadOnlyDictionary<string, string>? contextHeaders) where TMessage : class
+    private async Task<(ReadOnlyMemory<byte> Body, BasicProperties Properties)> BuildPayloadAsync<TMessage>(
+        TMessage message, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken) where TMessage : class
     {
         var headers = contextHeaders is not null ? new Dictionary<string, string>(contextHeaders) : null;
         var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, headers);
+
+        // Transport-level claim-check: offload a >threshold serialized envelope
+        // to the store and replace it with a tiny placeholder body, carrying the
+        // reference in a reserved AMQP header. ctx headers ride INSIDE the
+        // serialized envelope (MessageSerializer), but the claim-check ref must
+        // ride on the AMQP BasicProperties.Headers — the body itself is now just
+        // the placeholder, so an in-body header would be offloaded away with it.
+        // No-op (body sent inline, no header) when no store is registered or the
+        // body is small. See ClaimCheck.
+        var offloaded = await ClaimCheck.OffloadAsync(body, "application/json", claimCheckStore, cancellationToken: cancellationToken);
+
         var properties = new BasicProperties
         {
             ContentType = "application/json",
@@ -106,7 +118,16 @@ public sealed class RabbitMqPublisher(
             CorrelationId = contextHeaders?.GetValueOrDefault("conduit.correlation-id"),
             Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
         };
-        return (body, properties);
+
+        if (offloaded.Reference is Guid reference)
+        {
+            properties.Headers = new Dictionary<string, object?>
+            {
+                [ClaimCheck.HeaderKey] = reference.ToString("D")
+            };
+        }
+
+        return (offloaded.Body, properties);
     }
 
     /// <summary>

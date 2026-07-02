@@ -18,7 +18,8 @@ namespace Conduit.Messaging.AzureServiceBus;
 public sealed class AzureServiceBusPublisher(
     ServiceBusClient client,
     AzureServiceBusSettings settings,
-    PublisherSubjectGuard subjectGuard) : IMessagePublisher
+    PublisherSubjectGuard subjectGuard,
+    IClaimCheckStore? claimCheckStore = null) : IMessagePublisher
 {
     public async Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
         where TMessage : class
@@ -51,7 +52,7 @@ public sealed class AzureServiceBusPublisher(
             subjectGuard.EnsureCanPublish(typeof(TMessage).Name);
 
         await using var sender = client.CreateSender(topic);
-        var sbMessage = CreateMessage(message, contextHeaders);
+        var sbMessage = await CreateMessageAsync(message, contextHeaders, cancellationToken);
         await sender.SendMessageAsync(sbMessage, cancellationToken);
     }
 
@@ -65,21 +66,35 @@ public sealed class AzureServiceBusPublisher(
         where TMessage : class
     {
         await using var sender = client.CreateSender(queueName);
-        var sbMessage = CreateMessage(message, contextHeaders);
+        var sbMessage = await CreateMessageAsync(message, contextHeaders, cancellationToken);
         await sender.SendMessageAsync(sbMessage, cancellationToken);
     }
 
-    private static ServiceBusMessage CreateMessage<TMessage>(TMessage message, IReadOnlyDictionary<string, string>? contextHeaders)
+    private async Task<ServiceBusMessage> CreateMessageAsync<TMessage>(
+        TMessage message, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken)
         where TMessage : class
     {
         var json = JsonSerializer.SerializeToUtf8Bytes(message);
-        var sbMessage = new ServiceBusMessage(json)
+
+        // Transport-level claim-check: if the serialized body exceeds the
+        // threshold AND a store is registered, the body is offloaded and
+        // replaced by a tiny placeholder carrying the reference in a reserved
+        // application property. No-op (body sent inline) when no store is
+        // registered or the body is small. See ClaimCheck.
+        var result = await ClaimCheck.OffloadAsync(json, "application/json", claimCheckStore, cancellationToken: cancellationToken);
+
+        var sbMessage = new ServiceBusMessage(result.Body)
         {
             ContentType = "application/json",
             Subject = typeof(TMessage).Name
         };
 
         sbMessage.ApplicationProperties["MessageType"] = typeof(TMessage).AssemblyQualifiedName;
+
+        if (result.Reference is Guid reference)
+        {
+            sbMessage.ApplicationProperties[ClaimCheck.HeaderKey] = reference.ToString("D");
+        }
 
         if (contextHeaders != null)
         {
