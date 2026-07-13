@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Conduit.Messaging\Conduit.Messaging.csproj" />
     <ProjectReference Include="..\Conduit.Messaging.AzureServiceBus\Conduit.Messaging.AzureServiceBus.csproj" />
+    <ProjectReference Include="..\Conduit.Messaging.RabbitMq\Conduit.Messaging.RabbitMq.csproj" />
   </ItemGroup>
 
   <ItemGroup>

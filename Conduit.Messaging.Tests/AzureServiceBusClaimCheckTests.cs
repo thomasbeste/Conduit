@@ -43,8 +43,16 @@ public class AzureServiceBusClaimCheckTests
     {
         private readonly ConcurrentDictionary<Guid, byte[]> _blobs = new();
         public int GetCount { get; private set; }
+        public int ReleaseCount { get; private set; }
+        public Guid? DeletedId { get; private set; }
+        public Exception? DeleteFailure { get; set; }
+        public Action? OnDelete { get; set; }
 
-        public Task<Guid> StoreAsync(ReadOnlyMemory<byte> payload, string contentType, CancellationToken cancellationToken = default)
+        public Task<Guid> StoreAsync(
+            ReadOnlyMemory<byte> payload,
+            string contentType,
+            int expectedConsumers,
+            CancellationToken cancellationToken = default)
         {
             var id = Guid.NewGuid();
             _blobs[id] = payload.ToArray();
@@ -57,6 +65,20 @@ public class AzureServiceBusClaimCheckTests
             _blobs.TryGetValue(payloadId, out var blob);
             return Task.FromResult(blob);
         }
+
+        public Task ReleaseAsync(
+            Guid payloadId,
+            string consumerId,
+            CancellationToken cancellationToken = default)
+        {
+            ReleaseCount++;
+            DeletedId = payloadId;
+            OnDelete?.Invoke();
+            if (DeleteFailure is not null)
+                return Task.FromException(DeleteFailure);
+            _blobs.TryRemove(payloadId, out _);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class CallbackRecorder
@@ -64,8 +86,13 @@ public class AzureServiceBusClaimCheckTests
         public bool CompleteCalled { get; private set; }
         public bool AbandonCalled { get; private set; }
         public string? DeadLetterReason { get; private set; }
+        public Exception? CompleteFailure { get; set; }
 
-        public Func<CancellationToken, Task> Complete => _ => { CompleteCalled = true; return Task.CompletedTask; };
+        public Func<CancellationToken, Task> Complete => _ =>
+        {
+            CompleteCalled = true;
+            return CompleteFailure is null ? Task.CompletedTask : Task.FromException(CompleteFailure);
+        };
         public Func<string, string, CancellationToken, Task> DeadLetter => (reason, _, _) => { DeadLetterReason = reason; return Task.CompletedTask; };
         public Func<CancellationToken, Task> Abandon => _ => { AbandonCalled = true; return Task.CompletedTask; };
     }
@@ -87,10 +114,12 @@ public class AzureServiceBusClaimCheckTests
             NullLogger<AzureServiceBusMessageBus>.Instance);
 
     private static async Task<(CallbackRecorder recorder, TestConsumer consumer)> Run(
-        IServiceProvider sp, AzureServiceBusMessageBus.IncomingAsbMessage input)
+        IServiceProvider sp,
+        AzureServiceBusMessageBus.IncomingAsbMessage input,
+        CallbackRecorder? recorder = null)
     {
         var bus = BuildBus(sp);
-        var recorder = new CallbackRecorder();
+        recorder ??= new CallbackRecorder();
         await bus.ProcessMessageAsync(
             input,
             consumerType: typeof(TestConsumer),
@@ -109,6 +138,8 @@ public class AzureServiceBusClaimCheckTests
     {
         var store = new FakeStore();
         var sp = BuildSp(store);
+        var recorder = new CallbackRecorder();
+        store.OnDelete = () => Assert.True(recorder.CompleteCalled);
 
         // A >threshold payload: offload it the way the publisher does, keep the
         // placeholder as the wire body + the reference in the ref header.
@@ -127,7 +158,7 @@ public class AzureServiceBusClaimCheckTests
                 [ClaimCheck.HeaderKey] = offload.Reference!.Value.ToString("D"),
             });
 
-        var (recorder, consumer) = await Run(sp, input);
+        var (_, consumer) = await Run(sp, input, recorder);
 
         Assert.True(recorder.CompleteCalled);
         Assert.Null(recorder.DeadLetterReason);
@@ -135,6 +166,8 @@ public class AzureServiceBusClaimCheckTests
         Assert.Equal(1, consumer.DispatchCount);
         Assert.Equal(big.Payload, consumer.Received?.Payload);
         Assert.Equal(1, store.GetCount);
+        Assert.Equal(1, store.ReleaseCount);
+        Assert.Equal(offload.Reference, store.DeletedId);
     }
 
     [Fact]
@@ -158,6 +191,7 @@ public class AzureServiceBusClaimCheckTests
         Assert.True(recorder.CompleteCalled);
         Assert.Equal("inline", consumer.Received?.Payload);
         Assert.Equal(0, store.GetCount);
+        Assert.Equal(0, store.ReleaseCount);
     }
 
     [Fact]
@@ -166,7 +200,7 @@ public class AzureServiceBusClaimCheckTests
         var store = new FakeStore();
         var sp = BuildSp(store);
 
-        // Ref header points at a payload that was never stored (reaped).
+        // Ref header points at a payload that was never stored or was already consumed.
         var input = new AzureServiceBusMessageBus.IncomingAsbMessage(
             Body: "{\"__claimcheck__\":true}",
             MessageId: Guid.NewGuid().ToString(),
@@ -183,5 +217,65 @@ public class AzureServiceBusClaimCheckTests
         Assert.False(recorder.CompleteCalled);
         Assert.False(recorder.AbandonCalled);
         Assert.Equal("ClaimCheckMissing", recorder.DeadLetterReason);
+        Assert.Equal(0, store.ReleaseCount);
     }
+
+    [Fact]
+    public async Task Settlement_Failure_Abandons_And_Preserves_Claim_Check()
+    {
+        var store = new FakeStore();
+        var sp = BuildSp(store);
+        var offload = await ClaimCheck.OffloadAsync(
+            JsonSerializer.SerializeToUtf8Bytes(new TestMessage(new string('x', ClaimCheck.DefaultThresholdBytes + 1))),
+            "application/json",
+            store,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var input = ClaimCheckedInput(offload);
+        var recorder = new CallbackRecorder
+        {
+            CompleteFailure = new InvalidOperationException("lock lost"),
+        };
+
+        var (_, consumer) = await Run(sp, input, recorder);
+
+        Assert.Equal(1, consumer.DispatchCount);
+        Assert.True(recorder.CompleteCalled);
+        Assert.True(recorder.AbandonCalled);
+        Assert.Equal(0, store.ReleaseCount);
+        Assert.NotNull(await store.GetAsync(
+            offload.Reference!.Value,
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Cleanup_Failure_After_Completion_Does_Not_Abandon()
+    {
+        var store = new FakeStore { DeleteFailure = new InvalidOperationException("database unavailable") };
+        var sp = BuildSp(store);
+        var offload = await ClaimCheck.OffloadAsync(
+            JsonSerializer.SerializeToUtf8Bytes(new TestMessage(new string('x', ClaimCheck.DefaultThresholdBytes + 1))),
+            "application/json",
+            store,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var input = ClaimCheckedInput(offload);
+        var recorder = new CallbackRecorder();
+
+        var thrown = await Assert.ThrowsAsync<ClaimCheckCleanupException>(() => Run(sp, input, recorder));
+
+        Assert.Equal(offload.Reference, thrown.PayloadId);
+        Assert.True(recorder.CompleteCalled);
+        Assert.False(recorder.AbandonCalled);
+        Assert.Equal(3, store.ReleaseCount);
+    }
+
+    private static AzureServiceBusMessageBus.IncomingAsbMessage ClaimCheckedInput(ClaimCheck.OffloadResult offload) =>
+        new(
+            Body: Encoding.UTF8.GetString(offload.Body.Span),
+            MessageId: Guid.NewGuid().ToString(),
+            DeliveryCount: 1,
+            ApplicationProperties: new Dictionary<string, object>
+            {
+                ["MessageType"] = typeof(TestMessage).AssemblyQualifiedName!,
+                [ClaimCheck.HeaderKey] = offload.Reference!.Value.ToString("D"),
+            });
 }

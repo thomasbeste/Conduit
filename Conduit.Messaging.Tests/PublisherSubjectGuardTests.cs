@@ -109,6 +109,7 @@ public class PublisherSubjectGuardTests
 
         Assert.Single(guard.KnownSubjects);
         guard.EnsureCanPublish("FooEvent");
+        Assert.Equal(2, guard.GetExpectedConsumerCount("FooEvent"));
     }
 
     [Fact]
@@ -136,5 +137,16 @@ public class PublisherSubjectGuardTests
 
         Assert.Empty(guard.KnownSubjects);
         Assert.False(guard.HasWildcardSubscription);
+    }
+
+    [Fact]
+    public void Null_Subject_Correlation_Is_Conservatively_Counted_For_Ownership()
+    {
+        var guard = AzureServiceBusMessageBus.BuildPublisherGuard(Topic, [
+            new("service-a-fooevent", RuleFilterKind.Correlation, "FooEvent"),
+            new("legacy-property-filter", RuleFilterKind.Correlation, null),
+        ]);
+
+        Assert.Equal(2, guard.GetExpectedConsumerCount("FooEvent"));
     }
 }

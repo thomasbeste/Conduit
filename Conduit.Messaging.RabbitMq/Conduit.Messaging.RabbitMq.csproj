@@ -18,4 +18,8 @@
     <ProjectReference Include="..\Conduit.Messaging\Conduit.Messaging.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Conduit.Messaging.Tests" />
+  </ItemGroup>
+
 </Project>

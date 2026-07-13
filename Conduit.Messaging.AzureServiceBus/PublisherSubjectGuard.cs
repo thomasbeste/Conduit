@@ -26,10 +26,14 @@ namespace Conduit.Messaging.AzureServiceBus;
 /// names this subject can produce a refusal.
 /// </summary>
 public sealed record PublisherSubjectGuard(
-    IReadOnlySet<string> KnownSubjects,
-    bool HasWildcardSubscription,
+    IReadOnlyDictionary<string, IReadOnlySet<string>> SubjectSubscriptions,
+    IReadOnlySet<string> WildcardSubscriptions,
+    IReadOnlySet<string> PotentialOwnershipSubscriptions,
     string TopicName)
 {
+    public IReadOnlySet<string> KnownSubjects => SubjectSubscriptions.Keys.ToHashSet(StringComparer.Ordinal);
+    public bool HasWildcardSubscription => WildcardSubscriptions.Count > 0;
+
     /// <summary>
     /// Throws if no subscription on <see cref="TopicName"/> has a
     /// correlation filter for <paramref name="messageTypeName"/> AND no
@@ -46,6 +50,20 @@ public sealed record PublisherSubjectGuard(
             "Re-run the post-update reconciler against each consumer service's " +
             "subscription manifest, then restart this service so it re-reads " +
             "the topology. This is a deploy / topology bug, not a transient error.");
+    }
+
+    /// <summary>
+    /// Number of distinct subscriptions that may receive this subject. Opaque
+    /// wildcard/SQL rules are included conservatively; over-counting retains a
+    /// payload, while under-counting can delete bytes a queued delivery needs.
+    /// </summary>
+    public int GetExpectedConsumerCount(string messageTypeName)
+    {
+        EnsureCanPublish(messageTypeName);
+        var owners = new HashSet<string>(PotentialOwnershipSubscriptions, StringComparer.Ordinal);
+        if (SubjectSubscriptions.TryGetValue(messageTypeName, out var subjectOwners))
+            owners.UnionWith(subjectOwners);
+        return owners.Count;
     }
 }
 

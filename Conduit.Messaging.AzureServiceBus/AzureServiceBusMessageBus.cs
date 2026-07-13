@@ -93,7 +93,16 @@ public sealed class AzureServiceBusMessageBus(
                 // publisher's offload is a no-op. Resolved from the root
                 // provider (the publisher is a singleton owned by the bus).
                 var claimCheckStore = serviceProvider.GetService<IClaimCheckStore>();
-                _publisher = new AzureServiceBusPublisher(_client, settings, publisherGuard, claimCheckStore);
+                _publisher = new AzureServiceBusPublisher(
+                    _client,
+                    settings,
+                    publisherGuard,
+                    async (topic, subject, ct) =>
+                    {
+                        var liveGuard = await DiscoverPublisherGuardAsync(_adminClient!, topic, ct);
+                        return liveGuard.GetExpectedConsumerCount(subject);
+                    },
+                    claimCheckStore);
                 logger.LogInformation("Azure Service Bus connection established for {ServiceName}", serviceName);
                 break;
             }
@@ -307,13 +316,13 @@ public sealed class AzureServiceBusMessageBus(
             // claim-check reference header, fetch the original body back from the
             // store BEFORE deserialization so the handler sees the full payload.
             // No-op when the header is absent. Store is optional (GetService).
-            // A missing blob (reaped/never-stored) is unrecoverable — dead-letter
+            // A missing blob (already consumed/never-stored) is unrecoverable — dead-letter
             // rather than abandon, since a retry can't heal it.
             var claimCheckStore = scope.ServiceProvider.GetService<IClaimCheckStore>();
-            ReadOnlyMemory<byte> body;
+            ClaimCheck.RehydrateResult rehydrated;
             try
             {
-                body = await ClaimCheck.RehydrateAsync(
+                rehydrated = await ClaimCheck.RehydrateWithReferenceAsync(
                     Encoding.UTF8.GetBytes(input.Body),
                     key => input.ApplicationProperties.TryGetValue(key, out var v) ? v?.ToString() : null,
                     claimCheckStore,
@@ -328,7 +337,7 @@ public sealed class AzureServiceBusMessageBus(
                 return;
             }
 
-            var message = JsonSerializer.Deserialize(body.Span, messageType);
+            var message = JsonSerializer.Deserialize(rehydrated.Body.Span, messageType);
             if (message == null) return;
 
             var headers = new Dictionary<string, string>();
@@ -409,7 +418,12 @@ public sealed class AzureServiceBusMessageBus(
 
             await dispatcher.DispatchAsync(consumer, message, context, cancellationToken);
 
-            await complete(cancellationToken);
+            await ClaimCheck.SettleAndReleaseAsync(
+                rehydrated.Reference,
+                claimCheckStore,
+                subscriptionName,
+                complete,
+                cancellationToken);
 
             // Completion log: INFO when DeliveryCount > 1 (retry succeeded —
             // worth knowing the system is healing itself), DEBUG otherwise so
@@ -426,6 +440,17 @@ public sealed class AzureServiceBusMessageBus(
                     "asb_message_completed: type={MessageType}, id={MessageId}, sub={Subscription}",
                     messageType.Name, input.MessageId, subscriptionName);
             }
+        }
+        catch (ClaimCheckCleanupException ex)
+        {
+            // CompleteMessage already succeeded. Abandoning here would be both
+            // invalid and misleading: the broker cannot redeliver this delivery.
+            // Surface the persistence fault instead of silently leaking the row.
+            logger.LogCritical(
+                ex,
+                "ASB message {MessageId} on {Subscription} completed, but claim-check payload {PayloadId} cleanup failed",
+                input.MessageId, subscriptionName, ex.PayloadId);
+            throw;
         }
         catch (Exception ex)
         {
@@ -471,15 +496,21 @@ public sealed class AzureServiceBusMessageBus(
         string topicName,
         IEnumerable<SubscriptionRuleSummary> rules)
     {
-        var subjects = new HashSet<string>(StringComparer.Ordinal);
-        var hasWildcard = false;
+        var subjectSubscriptions = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var wildcardSubscriptions = new HashSet<string>(StringComparer.Ordinal);
+        var potentialOwnershipSubscriptions = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var r in rules)
         {
             switch (r.Kind)
             {
                 case RuleFilterKind.Correlation when !string.IsNullOrEmpty(r.CorrelationSubject):
-                    subjects.Add(r.CorrelationSubject);
+                    if (!subjectSubscriptions.TryGetValue(r.CorrelationSubject, out var subscriptions))
+                    {
+                        subscriptions = new HashSet<string>(StringComparer.Ordinal);
+                        subjectSubscriptions[r.CorrelationSubject] = subscriptions;
+                    }
+                    subscriptions.Add(r.SubscriptionName);
                     break;
                 case RuleFilterKind.True:
                 case RuleFilterKind.Sql:
@@ -487,12 +518,26 @@ public sealed class AzureServiceBusMessageBus(
                     // (e.g. user.role = 'admin') — we cannot statically
                     // decide whether a given Subject will or won't match,
                     // so we have to assume it might.
-                    hasWildcard = true;
+                    wildcardSubscriptions.Add(r.SubscriptionName);
+                    potentialOwnershipSubscriptions.Add(r.SubscriptionName);
+                    break;
+                case RuleFilterKind.Correlation:
+                    // A correlation rule without Subject can still match other
+                    // application properties. It does not make an unknown Subject
+                    // publishable, but must be counted once another rule permits it.
+                    potentialOwnershipSubscriptions.Add(r.SubscriptionName);
                     break;
             }
         }
 
-        return new PublisherSubjectGuard(subjects, hasWildcard, topicName);
+        return new PublisherSubjectGuard(
+            subjectSubscriptions.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlySet<string>)pair.Value,
+                StringComparer.Ordinal),
+            wildcardSubscriptions,
+            potentialOwnershipSubscriptions,
+            topicName);
     }
 
     /// <summary>

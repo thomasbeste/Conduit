@@ -19,12 +19,23 @@ public class ClaimCheckTests
         private readonly ConcurrentDictionary<Guid, byte[]> _blobs = new();
         public int StoreCount { get; private set; }
         public int GetCount { get; private set; }
+        private readonly HashSet<string> _releasedConsumers = new(StringComparer.Ordinal);
+        public int ReleaseCount { get; private set; }
+        public Guid? DeletedId { get; private set; }
+        public Exception? DeleteFailure { get; set; }
+        public int ReleaseFailuresRemaining { get; set; }
+        public int ExpectedConsumers { get; private set; }
 
-        public Task<Guid> StoreAsync(ReadOnlyMemory<byte> payload, string contentType, CancellationToken cancellationToken = default)
+        public Task<Guid> StoreAsync(
+            ReadOnlyMemory<byte> payload,
+            string contentType,
+            int expectedConsumers,
+            CancellationToken cancellationToken = default)
         {
             StoreCount++;
             var id = Guid.NewGuid();
             _blobs[id] = payload.ToArray();
+            ExpectedConsumers = expectedConsumers;
             return Task.FromResult(id);
         }
 
@@ -35,7 +46,25 @@ public class ClaimCheckTests
             return Task.FromResult(blob);
         }
 
-        /// <summary>Simulate a TTL reap: drop the blob but keep the reference live.</summary>
+        public Task ReleaseAsync(
+            Guid payloadId,
+            string consumerId,
+            CancellationToken cancellationToken = default)
+        {
+            ReleaseCount++;
+            DeletedId = payloadId;
+            if (DeleteFailure is not null && ReleaseFailuresRemaining > 0)
+            {
+                ReleaseFailuresRemaining--;
+                return Task.FromException(DeleteFailure);
+            }
+            _releasedConsumers.Add(consumerId);
+            if (_releasedConsumers.Count >= ExpectedConsumers)
+                _blobs.TryRemove(payloadId, out _);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>Simulate a missing blob: drop it but keep the reference live.</summary>
         public void Evict(Guid id) => _blobs.TryRemove(id, out _);
     }
 
@@ -114,12 +143,141 @@ public class ClaimCheckTests
         var offload = await ClaimCheck.OffloadAsync(BigBody(), "application/json", store, cancellationToken: Ct);
         var reference = offload.Reference!.Value;
 
-        // TTL reaper drops the blob while the message still carries the reference.
+        // The blob disappears while the message still carries the reference.
         store.Evict(reference);
 
         var ex = await Assert.ThrowsAsync<ClaimCheckMissingException>(() =>
             ClaimCheck.RehydrateAsync(offload.Body, HeaderFrom(reference), store, Ct));
 
         Assert.Equal(reference, ex.PayloadId);
+    }
+
+    [Fact]
+    public async Task SettleAndRelease_Releases_Only_After_Settlement_Succeeds()
+    {
+        var store = new FakeStore();
+        var offload = await ClaimCheck.OffloadAsync(BigBody(), "application/json", store, cancellationToken: Ct);
+        var settled = false;
+
+        await ClaimCheck.SettleAndReleaseAsync(
+            offload.Reference,
+            store,
+            "service-a-handler",
+            _ =>
+            {
+                Assert.Equal(0, store.ReleaseCount);
+                settled = true;
+                return Task.CompletedTask;
+            },
+            Ct);
+
+        Assert.True(settled);
+        Assert.Equal(1, store.ReleaseCount);
+        Assert.Equal(offload.Reference, store.DeletedId);
+    }
+
+    [Fact]
+    public async Task SettleAndRelease_Settlement_Failure_Preserves_Payload()
+    {
+        var store = new FakeStore();
+        var offload = await ClaimCheck.OffloadAsync(BigBody(), "application/json", store, cancellationToken: Ct);
+        var settlementFailure = new InvalidOperationException("broker unavailable");
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ClaimCheck.SettleAndReleaseAsync(
+                offload.Reference,
+                store,
+                "service-a-handler",
+                _ => Task.FromException(settlementFailure),
+                Ct));
+
+        Assert.Same(settlementFailure, thrown);
+        Assert.Equal(0, store.ReleaseCount);
+        Assert.NotNull(await store.GetAsync(offload.Reference!.Value, Ct));
+    }
+
+    [Fact]
+    public async Task SettleAndRelease_Cleanup_Failure_Is_Classified_As_Post_Settlement()
+    {
+        var cleanupFailure = new InvalidOperationException("database unavailable");
+        var store = new FakeStore
+        {
+            DeleteFailure = cleanupFailure,
+            ReleaseFailuresRemaining = int.MaxValue
+        };
+        var offload = await ClaimCheck.OffloadAsync(BigBody(), "application/json", store, cancellationToken: Ct);
+        var settled = false;
+
+        var thrown = await Assert.ThrowsAsync<ClaimCheckCleanupException>(() =>
+            ClaimCheck.SettleAndReleaseAsync(
+                offload.Reference,
+                store,
+                "service-a-handler",
+                _ =>
+                {
+                    settled = true;
+                    return Task.CompletedTask;
+                },
+                Ct));
+
+        Assert.True(settled);
+        Assert.Equal(offload.Reference, thrown.PayloadId);
+        Assert.Same(cleanupFailure, thrown.InnerException);
+        Assert.Equal(3, store.ReleaseCount);
+    }
+
+    [Fact]
+    public async Task SettleAndRelease_Retries_Transient_PostSettlement_Cleanup()
+    {
+        var store = new FakeStore
+        {
+            DeleteFailure = new InvalidOperationException("database temporarily unavailable"),
+            ReleaseFailuresRemaining = 2
+        };
+        var offload = await ClaimCheck.OffloadAsync(BigBody(), "application/json", store, cancellationToken: Ct);
+        var settled = false;
+
+        await ClaimCheck.SettleAndReleaseAsync(
+            offload.Reference,
+            store,
+            "service-a-handler",
+            _ =>
+            {
+                settled = true;
+                return Task.CompletedTask;
+            },
+            Ct);
+
+        Assert.True(settled);
+        Assert.Equal(3, store.ReleaseCount);
+        Assert.Null(await store.GetAsync(offload.Reference!.Value, Ct));
+    }
+
+    [Fact]
+    public async Task Shared_Payload_Remains_Until_Every_Distinct_Consumer_Settles()
+    {
+        var store = new FakeStore();
+        var offload = await ClaimCheck.OffloadAsync(
+            BigBody(),
+            "application/json",
+            store,
+            expectedConsumers: 2,
+            cancellationToken: Ct);
+        var reference = offload.Reference!.Value;
+        Assert.Equal(2, store.ExpectedConsumers);
+
+        await ClaimCheck.SettleAndReleaseAsync(
+            reference, store, "service-indexing-worker-handler", _ => Task.CompletedTask, Ct);
+        Assert.NotNull(await store.GetAsync(reference, Ct));
+
+        // A duplicate redelivery from the first queue is idempotent and cannot
+        // consume the second queue's ownership slot.
+        await ClaimCheck.SettleAndReleaseAsync(
+            reference, store, "service-indexing-worker-handler", _ => Task.CompletedTask, Ct);
+        Assert.NotNull(await store.GetAsync(reference, Ct));
+
+        await ClaimCheck.SettleAndReleaseAsync(
+            reference, store, "service-datahub-handler", _ => Task.CompletedTask, Ct);
+        Assert.Null(await store.GetAsync(reference, Ct));
     }
 }
