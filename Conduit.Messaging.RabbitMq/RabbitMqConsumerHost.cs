@@ -146,11 +146,14 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
 
             var queueArgs = new Dictionary<string, object?>
             {
-                // Consumer queues MUST be quorum: only quorum stamps the
-                // x-delivery-count header GetDeliveryCount reads to enforce the
-                // retry cap. x-delivery-limit is the broker-native poison backstop.
-                ["x-queue-type"] = "quorum",
-                ["x-delivery-limit"] = _settings.RetryCount + 1,
+                // CLASSIC queues (dev/e2e single-node RabbitMQ): quorum's per-queue
+                // in-memory Raft log is pure overhead on one node with no HA, and it
+                // tripped the memory watermark under the archive burst (#3131). We no
+                // longer need quorum's x-delivery-limit poison backstop: retry +
+                // dead-letter is owned by the transactional outbox (attempts /
+                // next_retry_at / failed_at), so a failed consume just nacks straight
+                // to the DLQ (OnMessageReceivedAsync) and the outbox + recovery sweep
+                // re-drive. No broker-side requeue loop, so no delivery cap needed.
                 ["x-dead-letter-exchange"] = _dlxExchange,
                 ["x-dead-letter-routing-key"] = _dlqQueue
             };
@@ -206,10 +209,11 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
                     _loggedTopologyMismatch = true;
                     _logger.LogError(oie,
                         "Queue {Queue} exists with INCOMPATIBLE arguments — consumer {ConsumerType} cannot bind and will " +
-                        "stay down until the queue is deleted or migrated (expected quorum, x-delivery-limit={Limit}, " +
-                        "dead-letter-exchange={Dlx}). Reply: {Reply}. The supervisor keeps probing, so it recovers " +
-                        "automatically once the queue is fixed.",
-                        _queueName, _registration.ConsumerType.Name, _settings.RetryCount + 1, _dlxExchange,
+                        "stay down until the queue is deleted or migrated (expected CLASSIC, " +
+                        "dead-letter-exchange={Dlx}; a pre-existing quorum queue from before the classic switch will 406 " +
+                        "here — delete it / --reset the broker). Reply: {Reply}. The supervisor keeps probing, so it " +
+                        "recovers automatically once the queue is fixed.",
+                        _queueName, _registration.ConsumerType.Name, _dlxExchange,
                         oie.ShutdownReason?.ReplyText);
                 }
             }
@@ -376,18 +380,19 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
         {
             _logger.LogError(ex, "Error consuming message from {Exchange} (delivery #{Count})", ea.Exchange, deliveryCount);
 
-            var shouldRequeue = deliveryCount < _settings.RetryCount;
+            // Classic queues + outbox-owned retry: a failed consume dead-letters
+            // immediately (no broker requeue — classic doesn't count deliveries, so
+            // requeue would loop). Retry + poison capping live in the transactional
+            // outbox (attempts/next_retry_at/failed_at); the recovery sweep re-drives
+            // any work-unit left un-settled by a DLQ'd command.
             try
             {
-                await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: shouldRequeue);
+                await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
             }
             catch (AlreadyClosedException) { }
 
-            if (!shouldRequeue)
-            {
-                _logger.LogWarning("Message from {Exchange} exceeded retry limit ({RetryCount}), sent to DLQ",
-                    ea.Exchange, _settings.RetryCount);
-            }
+            _logger.LogWarning("Message from {Exchange} failed, dead-lettered to DLQ (retry owned by outbox/recovery)",
+                ea.Exchange);
         }
     }
 
