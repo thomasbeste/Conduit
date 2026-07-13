@@ -204,9 +204,22 @@ public sealed class RabbitMqPublisher(
             // IConnection if the previous one died permanently (not just the
             // channel), so a publisher can't be stranded on a dead connection.
             var connection = await connectionProvider(cancellationToken);
-            _channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+            // Publisher confirms are MANDATORY, not optional. Without them BasicPublishAsync
+            // is fire-and-forget: it returns the instant the bytes hit the socket buffer and
+            // the caller believes the message was delivered even when the broker silently
+            // dropped it (burst backpressure, a channel/connection blip). That silent loss is
+            // how a work-unit gets marked "dispatched" for a command that never reached the
+            // queue — a permanent zombie whose completion never comes. With confirmations +
+            // tracking enabled, BasicPublishAsync awaits the broker ack and THROWS on nack /
+            // unroutable / timeout, so a lost publish fails loud, the dispatching message
+            // nacks + redelivers, and delivery is actually reliable.
+            _channel = await connection.CreateChannelAsync(
+                new CreateChannelOptions(
+                    publisherConfirmationsEnabled: true,
+                    publisherConfirmationTrackingEnabled: true),
+                cancellationToken: cancellationToken);
             _declaredExchanges.Clear();
-            logger.LogInformation("RabbitMQ publish channel created");
+            logger.LogInformation("RabbitMQ publish channel created (publisher confirms ON)");
             return _channel;
         }
         finally
