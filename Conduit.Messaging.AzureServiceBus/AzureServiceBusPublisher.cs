@@ -19,6 +19,7 @@ public sealed class AzureServiceBusPublisher(
     ServiceBusClient client,
     AzureServiceBusSettings settings,
     PublisherSubjectGuard subjectGuard,
+    Func<string, string, CancellationToken, Task<int>> claimCheckRouteCounter,
     IClaimCheckStore? claimCheckStore = null) : IMessagePublisher
 {
     public async Task PublishAsync<TMessage>(TMessage message, CancellationToken cancellationToken = default)
@@ -52,7 +53,11 @@ public sealed class AzureServiceBusPublisher(
             subjectGuard.EnsureCanPublish(typeof(TMessage).Name);
 
         await using var sender = client.CreateSender(topic);
-        var sbMessage = await CreateMessageAsync(message, contextHeaders, cancellationToken);
+        var sbMessage = await CreateMessageAsync(
+            message,
+            contextHeaders,
+            topic,
+            cancellationToken);
         await sender.SendMessageAsync(sbMessage, cancellationToken);
     }
 
@@ -66,12 +71,19 @@ public sealed class AzureServiceBusPublisher(
         where TMessage : class
     {
         await using var sender = client.CreateSender(queueName);
-        var sbMessage = await CreateMessageAsync(message, contextHeaders, cancellationToken);
+        var sbMessage = await CreateMessageAsync(
+            message,
+            contextHeaders,
+            topic: null,
+            cancellationToken);
         await sender.SendMessageAsync(sbMessage, cancellationToken);
     }
 
     private async Task<ServiceBusMessage> CreateMessageAsync<TMessage>(
-        TMessage message, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken)
+        TMessage message,
+        IReadOnlyDictionary<string, string>? contextHeaders,
+        string? topic,
+        CancellationToken cancellationToken)
         where TMessage : class
     {
         var json = JsonSerializer.SerializeToUtf8Bytes(message);
@@ -81,7 +93,21 @@ public sealed class AzureServiceBusPublisher(
         // replaced by a tiny placeholder carrying the reference in a reserved
         // application property. No-op (body sent inline) when no store is
         // registered or the body is small. See ClaimCheck.
-        var result = await ClaimCheck.OffloadAsync(json, "application/json", claimCheckStore, cancellationToken: cancellationToken);
+        var expectedConsumers = 1;
+        if (claimCheckStore is not null
+            && json.Length > ClaimCheck.DefaultThresholdBytes
+            && topic is not null)
+        {
+            expectedConsumers = await claimCheckRouteCounter(
+                topic, typeof(TMessage).Name, cancellationToken);
+        }
+
+        var result = await ClaimCheck.OffloadAsync(
+            json,
+            "application/json",
+            claimCheckStore,
+            expectedConsumers: expectedConsumers,
+            cancellationToken: cancellationToken);
 
         var sbMessage = new ServiceBusMessage(result.Body)
         {

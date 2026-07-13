@@ -27,6 +27,7 @@ namespace Conduit.Messaging.RabbitMq;
 /// </summary>
 public sealed class RabbitMqPublisher(
     Func<CancellationToken, Task<IConnection>> connectionProvider,
+    Func<string, string, string, CancellationToken, Task<int>> routeCounter,
     ILogger logger,
     IClaimCheckStore? claimCheckStore = null) : IMessagePublisher, IAsyncDisposable
 {
@@ -55,7 +56,8 @@ public sealed class RabbitMqPublisher(
         where TMessage : class
     {
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
-        var (body, properties) = await BuildPayloadAsync(message, contextHeaders, cancellationToken);
+        var (body, properties) = await BuildPayloadAsync(
+            message, contextHeaders, exchangeName, "fanout", routingKey: "", cancellationToken);
         await PublishWithRecoveryAsync(exchangeName, "fanout", routingKey: "", properties, body, cancellationToken);
 
         logger.LogDebug("Published {MessageType} to exchange {Exchange}", typeof(TMessage).Name, exchangeName);
@@ -69,7 +71,8 @@ public sealed class RabbitMqPublisher(
         where TMessage : class
     {
         var exchangeName = MessageSerializer.GetExchangeName(typeof(TMessage));
-        var (body, properties) = await BuildPayloadAsync(message, contextHeaders, cancellationToken);
+        var (body, properties) = await BuildPayloadAsync(
+            message, contextHeaders, exchangeName, "topic", topic, cancellationToken);
         await PublishWithRecoveryAsync(exchangeName, "topic", routingKey: topic, properties, body, cancellationToken);
 
         logger.LogDebug("Published {MessageType} to exchange {Exchange} with topic {Topic}",
@@ -83,7 +86,8 @@ public sealed class RabbitMqPublisher(
     public async Task SendAsync<TMessage>(TMessage message, string queueName, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken = default)
         where TMessage : class
     {
-        var (body, properties) = await BuildPayloadAsync(message, contextHeaders, cancellationToken);
+        var (body, properties) = await BuildPayloadAsync(
+            message, contextHeaders, exchangeName: "", exchangeType: null, queueName, cancellationToken);
 
         // Direct-to-queue via the default exchange. No exchange declare needed
         // (the default "" exchange always exists); still funnel through the
@@ -95,7 +99,12 @@ public sealed class RabbitMqPublisher(
     }
 
     private async Task<(ReadOnlyMemory<byte> Body, BasicProperties Properties)> BuildPayloadAsync<TMessage>(
-        TMessage message, IReadOnlyDictionary<string, string>? contextHeaders, CancellationToken cancellationToken) where TMessage : class
+        TMessage message,
+        IReadOnlyDictionary<string, string>? contextHeaders,
+        string exchangeName,
+        string? exchangeType,
+        string routingKey,
+        CancellationToken cancellationToken) where TMessage : class
     {
         var headers = contextHeaders is not null ? new Dictionary<string, string>(contextHeaders) : null;
         var body = MessageSerializer.Serialize(message, typeof(TMessage).FullName ?? typeof(TMessage).Name, headers);
@@ -108,7 +117,21 @@ public sealed class RabbitMqPublisher(
         // the placeholder, so an in-body header would be offloaded away with it.
         // No-op (body sent inline, no header) when no store is registered or the
         // body is small. See ClaimCheck.
-        var offloaded = await ClaimCheck.OffloadAsync(body, "application/json", claimCheckStore, cancellationToken: cancellationToken);
+        var expectedConsumers = 1;
+        if (claimCheckStore is not null
+            && body.Length > ClaimCheck.DefaultThresholdBytes
+            && exchangeType is not null)
+        {
+            expectedConsumers = await routeCounter(
+                exchangeName, exchangeType, routingKey, cancellationToken);
+        }
+
+        var offloaded = await ClaimCheck.OffloadAsync(
+            body,
+            "application/json",
+            claimCheckStore,
+            expectedConsumers: expectedConsumers,
+            cancellationToken: cancellationToken);
 
         var properties = new BasicProperties
         {

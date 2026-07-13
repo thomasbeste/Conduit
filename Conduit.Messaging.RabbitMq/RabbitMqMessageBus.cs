@@ -58,7 +58,12 @@ public sealed class RabbitMqMessageBus(
         // no store is registered. The publisher is a singleton owned by the bus,
         // so the store is resolved once from the root provider here.
         var claimCheckStore = serviceProvider.GetService<IClaimCheckStore>();
-        _publisher = new RabbitMqPublisher(GetConnectionAsync, logger, claimCheckStore);
+        var routeCounter = new RabbitMqRouteCounter(settings);
+        _publisher = new RabbitMqPublisher(
+            GetConnectionAsync,
+            routeCounter.CountAsync,
+            logger,
+            claimCheckStore);
 
         foreach (var reg in consumerRegistrations)
         {

@@ -266,14 +266,14 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
             // absent. Store is optional (GetService). A missing blob is
             // unrecoverable — nack WITHOUT requeue (dead-letter) rather than retry.
             var claimCheckStore = scope.ServiceProvider.GetService<IClaimCheckStore>();
-            var rehydratedBody = await ClaimCheck.RehydrateAsync(
+            var rehydrated = await ClaimCheck.RehydrateWithReferenceAsync(
                 ea.Body,
                 key => ea.BasicProperties.Headers is { } hdrs && hdrs.TryGetValue(key, out var v)
                     ? v is byte[] vb ? Encoding.UTF8.GetString(vb) : v?.ToString()
                     : null,
                 claimCheckStore);
 
-            var (message, envelope) = MessageSerializer.Deserialize(rehydratedBody, _registration.MessageType);
+            var (message, envelope) = MessageSerializer.Deserialize(rehydrated.Body, _registration.MessageType);
 
             if (message == null)
             {
@@ -335,8 +335,22 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
             var consumerInstance = scope.ServiceProvider.GetRequiredService(_registration.ConsumerType);
             await _registration.GetDispatcher().DispatchAsync(consumerInstance, message, context, CancellationToken.None);
 
-            await channel.BasicAckAsync(ea.DeliveryTag, multiple: false);
+            await ClaimCheck.SettleAndReleaseAsync(
+                rehydrated.Reference,
+                claimCheckStore,
+                _queueName,
+                _ => channel.BasicAckAsync(ea.DeliveryTag, multiple: false).AsTask());
             _getOnMessageConsumed()?.Invoke(message, _registration.MessageType);
+        }
+        catch (ClaimCheckCleanupException ex)
+        {
+            // BasicAck already succeeded. A nack here cannot cause a valid
+            // redelivery and would hide the durable-store failure, so surface it.
+            _logger.LogCritical(
+                ex,
+                "RMQ message {MessageId} from {Exchange} was acknowledged, but claim-check payload {PayloadId} cleanup failed",
+                ea.BasicProperties.MessageId, ea.Exchange, ex.PayloadId);
+            throw;
         }
         catch (AlreadyClosedException)
         {
@@ -349,7 +363,7 @@ public sealed class RabbitMqConsumerHost : ISupervisedConsumer
         }
         catch (ClaimCheckMissingException ex)
         {
-            // The message referenced an offloaded payload that is gone (reaped or
+            // The message referenced an offloaded payload that is gone (already consumed or
             // never stored). A retry can't heal it — nack WITHOUT requeue so the
             // broker dead-letters it immediately.
             _logger.LogError(ex,

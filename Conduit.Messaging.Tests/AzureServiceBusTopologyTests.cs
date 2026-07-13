@@ -108,6 +108,16 @@ public class AzureServiceBusTopologyTests
             ct: TestContext.Current.CancellationToken);
     }
 
+    [Fact]
+    public void Long_Subscription_Name_Uses_The_Cross_Runtime_Golden_Value()
+    {
+        Assert.Equal(
+            "service-indexing-worker-sharepointchangen-0c0d0a4b",
+            AzureServiceBusMessageBus.BuildSubscriptionName(
+                "service-indexing-worker",
+                "SharePointChangeNotification"));
+    }
+
     // --- Test types --------------------------------------------------------
 
     private sealed class FakeMessage { }

@@ -15,6 +15,12 @@ public class RabbitMqSettings
     public string Password { get; set; } = "PLACEHOLDER";
 
     /// <summary>
+    /// Optional RabbitMQ management API base URL used for live claim-check route
+    /// ownership. Defaults to the broker host on port 15672 (or 15671 with SSL).
+    /// </summary>
+    public string? ManagementUrl { get; set; }
+
+    /// <summary>
     /// Number of concurrent message consumers per endpoint.
     /// </summary>
     public ushort PrefetchCount { get; set; } = 10;

@@ -21,6 +21,7 @@ public sealed class RabbitMqFixture : IAsyncLifetime
     public RabbitMqContainer Container { get; } = new RabbitMqBuilder("rabbitmq:3.13-management-alpine")
         .WithUsername("conduit")
         .WithPassword("conduit")
+        .WithPortBinding(15672, true)
         .Build();
 
     public ValueTask InitializeAsync() => new(Container.StartAsync());
@@ -31,6 +32,7 @@ public sealed class RabbitMqFixture : IAsyncLifetime
 public sealed class RabbitMqTransportTests(RabbitMqFixture fixture) : IClassFixture<RabbitMqFixture>
 {
     public sealed record Ping(string Value);
+    public sealed record OversizedPing(string Value);
 
     public sealed class PingConsumer : IMessageConsumer<Ping>
     {
@@ -40,13 +42,73 @@ public sealed class RabbitMqTransportTests(RabbitMqFixture fixture) : IClassFixt
             => Task.CompletedTask;
     }
 
+    public sealed class OversizedPingConsumer : IMessageConsumer<OversizedPing>
+    {
+        public Task ConsumeAsync(
+            OversizedPing message,
+            MessageContext context,
+            CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+    }
+
+    private sealed class RecordingClaimCheckStore : IClaimCheckStore
+    {
+        private sealed record StoredPayload(byte[] Body, int ExpectedConsumers)
+        {
+            public HashSet<string> ReleasedConsumers { get; } = new(StringComparer.Ordinal);
+        }
+
+        private readonly ConcurrentDictionary<Guid, StoredPayload> _payloads = new();
+
+        public int? LastExpectedConsumers { get; private set; }
+        public int Count => _payloads.Count;
+
+        public Task<Guid> StoreAsync(
+            ReadOnlyMemory<byte> payload,
+            string contentType,
+            int expectedConsumers,
+            CancellationToken cancellationToken = default)
+        {
+            var id = Guid.NewGuid();
+            LastExpectedConsumers = expectedConsumers;
+            Assert.True(_payloads.TryAdd(id, new StoredPayload(payload.ToArray(), expectedConsumers)));
+            return Task.FromResult(id);
+        }
+
+        public Task<byte[]?> GetAsync(Guid payloadId, CancellationToken cancellationToken = default)
+            => Task.FromResult(_payloads.TryGetValue(payloadId, out var payload) ? payload.Body : null);
+
+        public Task ReleaseAsync(
+            Guid payloadId,
+            string consumerId,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_payloads.TryGetValue(payloadId, out var payload))
+                return Task.CompletedTask;
+
+            lock (payload.ReleasedConsumers)
+            {
+                payload.ReleasedConsumers.Add(consumerId);
+                if (payload.ReleasedConsumers.Count >= payload.ExpectedConsumers)
+                    _payloads.TryRemove(payloadId, out _);
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+
     private async Task<(ServiceProvider Sp, IMessageBus Bus, ConcurrentBag<string> Consumed)> BuildBusAsync(
-        string serviceName, CancellationToken ct)
+        string serviceName,
+        CancellationToken ct,
+        IClaimCheckStore? claimCheckStore = null,
+        bool consumeOversizedPing = false)
     {
         var consumed = new ConcurrentBag<string>();
 
         var services = new ServiceCollection();
         services.AddLogging();
+        if (claimCheckStore is not null)
+            services.AddSingleton(claimCheckStore);
         services.AddConduitMessaging(cfg =>
         {
             cfg.ServiceName = serviceName;
@@ -57,9 +119,13 @@ public sealed class RabbitMqTransportTests(RabbitMqFixture fixture) : IClassFixt
                 s.Username = "conduit";
                 s.Password = "conduit";
                 s.VirtualHost = "/";
+                s.ManagementUrl = $"http://{fixture.Container.Hostname}:{fixture.Container.GetMappedPublicPort(15672)}";
                 s.RetryCount = 3;
             });
-            cfg.AddConsumer<PingConsumer>();
+            if (consumeOversizedPing)
+                cfg.AddConsumer<OversizedPingConsumer>();
+            else
+                cfg.AddConsumer<PingConsumer>();
         });
 
         var sp = services.BuildServiceProvider();
@@ -67,7 +133,11 @@ public sealed class RabbitMqTransportTests(RabbitMqFixture fixture) : IClassFixt
 
         // Observe consumption (set before Start; the host reads it lazily).
         if (bus is RabbitMqMessageBus rmq)
-            rmq.OnMessageConsumed = (msg, _) => { if (msg is Ping p) consumed.Add(p.Value); };
+            rmq.OnMessageConsumed = (msg, _) =>
+            {
+                if (msg is Ping ping) consumed.Add(ping.Value);
+                if (msg is OversizedPing oversized) consumed.Add(oversized.Value);
+            };
 
         await bus.StartAsync(ct);
         return (sp, bus, consumed);
@@ -116,6 +186,32 @@ public sealed class RabbitMqTransportTests(RabbitMqFixture fixture) : IClassFixt
         Assert.True(
             await WaitUntilAsync(() => consumed.Contains("hello"), TimeSpan.FromSeconds(30)),
             "the consumer should receive the message through the real RabbitMQ broker");
+    }
+
+    [Fact]
+    public async Task Oversized_fanout_payload_is_released_after_both_real_queues_acknowledge()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = new RecordingClaimCheckStore();
+        var (firstProvider, firstBus, firstConsumed) = await BuildBusAsync(
+            $"fanout-a-{Guid.NewGuid():N}", ct, store, consumeOversizedPing: true);
+        await using var _first = firstProvider;
+        var (secondProvider, _, secondConsumed) = await BuildBusAsync(
+            $"fanout-b-{Guid.NewGuid():N}", ct, store, consumeOversizedPing: true);
+        await using var _second = secondProvider;
+        var value = new string('x', ClaimCheck.DefaultThresholdBytes + 1);
+
+        await firstBus.Publisher.PublishAsync(new OversizedPing(value), ct);
+
+        Assert.True(
+            await WaitUntilAsync(
+                () => firstConsumed.Contains(value) && secondConsumed.Contains(value),
+                TimeSpan.FromSeconds(30)),
+            "both durable queues should consume the same oversized fan-out delivery");
+        Assert.Equal(2, store.LastExpectedConsumers);
+        Assert.True(
+            await WaitUntilAsync(() => store.Count == 0, TimeSpan.FromSeconds(10)),
+            "the last distinct queue acknowledgement should delete the offloaded payload");
     }
 
     [Fact]
