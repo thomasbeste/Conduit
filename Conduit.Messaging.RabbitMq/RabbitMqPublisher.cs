@@ -171,7 +171,15 @@ public sealed class RabbitMqPublisher(
                 var channel = await GetOrCreateChannelAsync(cancellationToken);
                 if (exchangeType is not null)
                     await EnsureExchangeDeclaredAsync(channel, exchangeName, exchangeType, cancellationToken);
-                await channel.BasicPublishAsync(exchangeName, routingKey, mandatory: false, properties, body, cancellationToken);
+                // mandatory: true — an UNROUTABLE message (no bound queue at publish time:
+                // a binding/reconnect race under burst, a not-yet-reconciled subscription)
+                // is otherwise silently ACKED by the broker and dropped, even with publisher
+                // confirms on. With mandatory + confirmation tracking the broker returns it and
+                // the publish faults, so the caller re-drives instead of leaving a work-unit
+                // marked "dispatched" for a command that never reached its queue. Every
+                // published type has a pre-created durable subscription, so a persistent
+                // unroutable is a real bug that must fail loud, not vanish.
+                await channel.BasicPublishAsync(exchangeName, routingKey, mandatory: true, properties, body, cancellationToken);
                 return;
             }
             catch (AlreadyClosedException ex) when (attempt == 1)
@@ -218,8 +226,20 @@ public sealed class RabbitMqPublisher(
                     publisherConfirmationsEnabled: true,
                     publisherConfirmationTrackingEnabled: true),
                 cancellationToken: cancellationToken);
+            // Surface unroutable returns loudly. With confirmation tracking + mandatory:true
+            // an unroutable publish also faults the BasicPublishAsync task (so the caller
+            // re-drives); this handler makes the CAUSE visible instead of a bare exception —
+            // exchange + routing key + reply text pinpoint the missing binding/subscription.
+            _channel.BasicReturnAsync += (_, ea) =>
+            {
+                logger.LogError(
+                    "RabbitMQ returned an UNROUTABLE message: exchange='{Exchange}' routingKey='{RoutingKey}' reply={ReplyCode}:{ReplyText}. "
+                    + "The publish faults and re-drives — but a persistent return means a missing binding/subscription.",
+                    ea.Exchange, ea.RoutingKey, ea.ReplyCode, ea.ReplyText);
+                return Task.CompletedTask;
+            };
             _declaredExchanges.Clear();
-            logger.LogInformation("RabbitMQ publish channel created (publisher confirms ON)");
+            logger.LogInformation("RabbitMQ publish channel created (publisher confirms ON, mandatory ON)");
             return _channel;
         }
         finally
